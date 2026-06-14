@@ -188,6 +188,7 @@ button:disabled {
   gap: 18px;
   min-height: 48px;
   margin-bottom: 16px;
+  scroll-margin-top: 18px;
 }
 
 .workspace-header h1 {
@@ -370,6 +371,7 @@ button:disabled {
 .panel {
   min-width: 0;
   overflow: hidden;
+  scroll-margin-top: 18px;
 }
 
 .panel-header {

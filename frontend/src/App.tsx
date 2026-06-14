@@ -3,7 +3,6 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
-  Bell,
   Cloud,
   Database,
   Download,
@@ -264,6 +263,7 @@ export function App() {
   const [saving, setSaving] = useState(false);
   const [togglingSupplier, setTogglingSupplier] = useState<DemoSupplier | null>(null);
   const [page, setPage] = useState(1);
+  const [activeNav, setActiveNav] = useState("resumen");
 
   const activeCalls = useMemo(
     () =>
@@ -649,6 +649,11 @@ export function App() {
     }
   ];
 
+  function navigateToSection(sectionId: string) {
+    setActiveNav(sectionId);
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   return (
     <main className="app-frame">
       <aside className="sidebar">
@@ -663,14 +668,14 @@ export function App() {
         </div>
 
         <nav className="side-nav" aria-label="Principal">
-          <SidebarItem active icon={<Home size={20} />} label="Resumen" />
-          <SidebarItem icon={<PhoneCall size={20} />} label="Llamadas" />
-          <SidebarItem icon={<SlidersHorizontal size={20} />} label="Extensiones" />
-          <SidebarItem icon={<Settings size={20} />} label="Proveedores" />
-          <SidebarItem icon={<Users size={20} />} label="Usuarios" />
-          <SidebarItem icon={<FileText size={20} />} label="Reportes" />
-          <SidebarItem icon={<Bell size={20} />} label="Alertas" />
-          <SidebarItem icon={<Settings size={20} />} label="Configuracion" />
+          <SidebarItem active={activeNav === "resumen"} icon={<Home size={20} />} label="Resumen" onClick={() => navigateToSection("resumen")} />
+          <SidebarItem active={activeNav === "llamadas"} icon={<PhoneCall size={20} />} label="Llamadas" onClick={() => navigateToSection("llamadas")} />
+          <SidebarItem active={activeNav === "extensiones"} icon={<SlidersHorizontal size={20} />} label="Extensiones" onClick={() => navigateToSection("extensiones")} />
+          <SidebarItem active={activeNav === "proveedores"} icon={<Settings size={20} />} label="Proveedores" onClick={() => navigateToSection("proveedores")} />
+          <SidebarItem active={activeNav === "usuarios"} icon={<Users size={20} />} label="Usuarios" onClick={() => navigateToSection("usuarios")} />
+          <SidebarItem active={activeNav === "grabaciones"} icon={<FileAudio size={20} />} label="Grabaciones" onClick={() => navigateToSection("grabaciones")} />
+          <SidebarItem active={activeNav === "auditoria"} icon={<Shield size={20} />} label="Auditoria" onClick={() => navigateToSection("auditoria")} />
+          <SidebarItem icon={<FileText size={20} />} label="Reporte" onClick={() => void downloadReport()} />
         </nav>
 
         <button className="operator-card" type="button" onClick={logout}>
@@ -686,7 +691,7 @@ export function App() {
       </aside>
 
       <section className="workspace">
-        <header className="workspace-header">
+        <header className="workspace-header" id="resumen">
           <h1>Sistema de Telefonia</h1>
           <div className="header-actions">
             <button className="secondary-button" type="button" onClick={() => void downloadReport()}>
@@ -717,7 +722,7 @@ export function App() {
         <section className="dashboard-grid">
           <div className="main-column">
             <section className="top-panels">
-              <Panel title="Circuit breaker - proveedores" icon={<Settings size={20} />} className="circuit-panel">
+              <Panel id="proveedores" title="Circuit breaker - proveedores" icon={<Settings size={20} />} className="circuit-panel">
                 <div className="circuit-list">
                   {(health?.suppliers ?? []).map((supplier) => (
                     <div className="circuit-row" key={supplier.supplier}>
@@ -743,7 +748,7 @@ export function App() {
                 </div>
               </Panel>
 
-              <Panel title="Softphones - extensiones" icon={<Headphones size={20} />} className="softphone-panel">
+              <Panel id="extensiones" title="Softphones - extensiones" icon={<Headphones size={20} />} className="softphone-panel">
                 <div className="extension-list">
                   {extensionStatuses.map((extension) => (
                     <div className="extension-row" key={extension.extension}>
@@ -768,6 +773,7 @@ export function App() {
                   {activeCalls.length}
                 </span>
               }
+              id="llamadas"
               className="calls-panel"
             >
               <div className="table-wrap">
@@ -857,7 +863,7 @@ export function App() {
           </div>
 
           <aside className="right-column">
-            <Panel title="Directorio - usuarios" icon={<Users size={20} />}>
+            <Panel id="usuarios" title="Directorio - usuarios" icon={<Users size={20} />}>
               <div className="user-list">
                 {usuarios.map((user) => {
                   const runtime = extensionStatuses.find((status) => status.extension === user.extension);
@@ -887,7 +893,7 @@ export function App() {
               </div>
             </Panel>
 
-            <Panel title="Grabaciones - CDR" icon={<FileAudio size={20} />}>
+            <Panel id="grabaciones" title="Grabaciones - CDR" icon={<FileAudio size={20} />}>
               <div className="recording-list">
                 {recordings.length === 0 && <p className="empty-note">Sin grabaciones registradas.</p>}
                 {recordings.slice(0, 4).map((recording) => (
@@ -912,7 +918,7 @@ export function App() {
               </div>
             </Panel>
 
-            <Panel title="Auditoria - acciones" icon={<Shield size={20} />}>
+            <Panel id="auditoria" title="Auditoria - acciones" icon={<Shield size={20} />}>
               <div className="audit-list">
                 {audit.slice(0, 5).map((item) => (
                   <div className="audit-row" key={item.id}>
@@ -1017,18 +1023,40 @@ export function App() {
   );
 }
 
-function SidebarItem({ active = false, icon, label }: { active?: boolean; icon: ReactNode; label: string }) {
+function SidebarItem({
+  active = false,
+  icon,
+  label,
+  onClick
+}: {
+  active?: boolean;
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
   return (
-    <button className={`side-link ${active ? "active" : ""}`} type="button">
+    <button className={`side-link ${active ? "active" : ""}`} type="button" onClick={onClick}>
       {icon}
       {label}
     </button>
   );
 }
 
-function Panel({ title, icon, className = "", children }: { title: string; icon: ReactNode; className?: string; children: ReactNode }) {
+function Panel({
+  id,
+  title,
+  icon,
+  className = "",
+  children
+}: {
+  id?: string;
+  title: string;
+  icon: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
   return (
-    <section className={`panel ${className}`}>
+    <section id={id} className={`panel ${className}`}>
       <div className="panel-header">
         <h2>{title}</h2>
         {icon}
