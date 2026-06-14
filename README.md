@@ -1,80 +1,73 @@
-# Sistema de Telefonia
+# Sistema de Red Telefonia
 
-Proyecto local para simular y probar una red telefonica interna usando FreePBX/Asterisk.
+Sistema local de telefonia interna basado en FreePBX/Asterisk, con monitoreo de llamadas en tiempo real, persistencia de eventos, evidencias en almacenamiento compatible con S3 y circuit breaker para proveedores externos.
 
-La idea es que podamos registrar softphones, llamar entre extensiones, ver las llamadas en un dashboard y probar que el sistema aguanta fallas de algunos servicios usando circuit breaker.
+El proyecto permite registrar softphones, realizar llamadas entre extensiones internas, observar el flujo de llamada desde un dashboard y validar escenarios de falla controlada sin depender de servicios cloud reales.
 
-## Que tiene
+## Arquitectura
 
-- FreePBX + Asterisk para la central telefonica.
-- Extensiones SIP/PJSIP de prueba: `1001` y `1002`.
-- Backend en Node/Express.
-- Dashboard en React.
-- PostgreSQL para usuarios, llamadas y eventos.
-- Floci como nube local para SQS y S3.
-- AMI para capturar eventos reales de Asterisk.
-- CDR para comparar llamadas con el registro de FreePBX.
-- Login para el dashboard.
-- Scripts para pruebas, reporte, backup y restore.
+| Componente | Tecnologia | Funcion |
+| --- | --- | --- |
+| PBX | FreePBX + Asterisk | Registro SIP/PJSIP, ruteo de llamadas y CDR |
+| Backend | Node.js + Express | API REST, WebSocket, AMI, circuit breaker y reportes |
+| Frontend | React + Vite | Dashboard operativo |
+| Base de datos | PostgreSQL | Usuarios, llamadas y eventos procesados |
+| Cloud local | Floci | SQS para eventos y S3 para evidencias |
+| CDR | MariaDB FreePBX | Registro oficial de llamadas de Asterisk |
 
-## Como levantarlo
+## Requisitos
 
-Primero copiamos las variables de ejemplo:
+- Docker
+- Docker Compose
+- Git
+- Softphone SIP/PJSIP, por ejemplo Zoiper, Linphone o MicroSIP
+
+## Configuracion
+
+Crear el archivo de entorno local:
 
 ```bash
 cp .env.example .env
 ```
 
-Luego levantamos todo:
+Las credenciales incluidas son solo para entorno local de desarrollo.
+
+Credenciales del dashboard:
+
+```text
+Usuario: admin
+Password: telefonia_admin_dev
+```
+
+## Ejecucion
+
+Levantar todos los servicios:
 
 ```bash
 docker compose up -d --build
 ```
 
-Dashboard:
+Servicios principales:
 
 ```text
-http://localhost:5173
+Dashboard:  http://localhost:5173
+Backend:    http://localhost:3000
+FreePBX:    http://localhost:8081
+Floci:      http://localhost:4566
+PostgreSQL: localhost:5432
 ```
 
-Login local:
+Puertos de telefonia:
 
 ```text
-admin / telefonia_admin_dev
+SIP: 5060/udp
+AMI: 5038/tcp
+RTP: 10000-10100/udp
 ```
 
-Si cambian credenciales en `.env`, reinicien backend y frontend:
+## FreePBX
 
-```bash
-docker compose up -d --build backend frontend
-```
-
-## Como trabajar en grupo
-
-Clonar:
-
-```bash
-git clone git@github.com:AnderssonEspinoza/sistema-red-telefonia.git
-cd sistema-red-telefonia
-cp .env.example .env
-docker compose up -d --build
-```
-
-Antes de subir cambios:
-
-```bash
-git pull
-git status
-./scripts/run-smoke-tests.sh
-```
-
-No suban `.env`, `node_modules`, `dist`, `backups` ni `reports`. Ya estan ignorados en `.gitignore`.
-
-Para que alguien pueda hacer push, el dueno del repo debe agregarlo como colaborador en GitHub.
-
-## FreePBX y softphones
-
-Si FreePBX no queda listo o faltan extensiones:
+Instalacion y preparacion de FreePBX:
 
 ```bash
 ./scripts/install-freepbx.sh
@@ -88,10 +81,10 @@ Extensiones de prueba:
 1002 / Telefonia1002
 ```
 
-En el softphone:
+Configuracion sugerida para softphones:
 
 ```text
-Servidor: IP LAN de la maquina donde corre Docker
+Servidor: IP LAN del host Docker
 Puerto: 5060 UDP
 Usuario: 1001 o 1002
 Password: Telefonia1001 o Telefonia1002
@@ -103,33 +96,55 @@ Si la llamada timbra pero no hay audio:
 ./scripts/fix-lan-audio.sh
 ```
 
-## Demo rapida
+## Flujo de validacion
 
-1. Abrir el dashboard.
-2. Registrar los dos softphones.
-3. Llamar de `1001` a `1002`.
-4. Contestar y cortar.
-5. Revisar que la llamada aparezca en el dashboard.
-6. Probar una falla:
+1. Iniciar sesion en el dashboard.
+2. Registrar los softphones `1001` y `1002`.
+3. Realizar una llamada de `1001` a `1002`.
+4. Contestar y finalizar la llamada.
+5. Verificar en el dashboard los estados de llamada, extension, circuit breaker y evidencia.
+6. Generar el reporte de validacion:
+
+```bash
+./scripts/demo-report.sh
+```
+
+El reporte se genera en `reports/`.
+
+## Pruebas operativas
+
+Health check:
+
+```bash
+./scripts/health.sh
+```
+
+Pruebas automatizadas:
+
+```bash
+./scripts/run-smoke-tests.sh
+```
+
+Prueba de circuit breaker:
 
 ```bash
 ./scripts/demo-circuit-breaker.sh floci-sqs
 ```
 
-7. Generar reporte:
+Proveedores soportados para falla controlada:
 
-```bash
-./scripts/demo-report.sh
+```text
+postgres
+ami
+floci-sqs
+floci-s3
 ```
 
-El reporte queda en `reports/`.
+## Backup y restauracion
 
-## Scripts utiles
+Crear backup:
 
 ```bash
-./scripts/health.sh
-./scripts/run-smoke-tests.sh
-./scripts/demo-report.sh
 ./scripts/backup.sh
 ```
 
@@ -139,19 +154,37 @@ Restaurar backup:
 CONFIRM_RESTORE=YES ./scripts/restore.sh backups/<fecha>
 ```
 
-## Puertos
+El backup incluye:
+
+- Base PostgreSQL del sistema
+- Base MariaDB de FreePBX y CDR
+- Evidencias almacenadas en Floci S3
+- Archivos de configuracion relevantes
+
+## Estructura
 
 ```text
-Dashboard:  http://localhost:5173
-Backend:    http://localhost:3000
-FreePBX:    http://localhost:8081
-Floci:      http://localhost:4566
-PostgreSQL: localhost:5432
-SIP:        5060/udp
-RTP:        10000-10100/udp
+backend/        API, AMI, circuit breaker, CDR y reportes
+frontend/       Dashboard React
+db/             Esquema inicial de PostgreSQL
+freepbx/        Configuracion inicial de FreePBX/Asterisk
+scripts/        Automatizacion operativa
+docs/           Documentacion complementaria
 ```
 
-## Documentos
+## Versionamiento
 
-- Instalacion mas detallada: [docs/INSTALL.md](docs/INSTALL.md)
-- Guion para presentar: [docs/DEMO.md](docs/DEMO.md)
+Los archivos locales y generados no forman parte del repositorio:
+
+```text
+.env
+node_modules/
+dist/
+backups/
+reports/
+```
+
+## Documentacion
+
+- [Instalacion local](docs/INSTALL.md)
+- [Guion de demostracion](docs/DEMO.md)
