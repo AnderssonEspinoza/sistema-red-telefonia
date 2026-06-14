@@ -1,0 +1,101 @@
+name: sistema-telefonia
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  floci:
+    image: floci/floci:latest
+    restart: unless-stopped
+    ports:
+      - "4566:4566"
+    volumes:
+      - floci_data:/app/data
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: ${BACKEND_PORT}
+      NODE_ENV: production
+    ports:
+      - "${BACKEND_PORT}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      floci:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: http://localhost:${BACKEND_PORT}
+      VITE_WS_URL: ws://localhost:${BACKEND_PORT}
+    ports:
+      - "${FRONTEND_PORT}:5173"
+    depends_on:
+      - backend
+
+  freepbx-db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${FREEPBX_DB_ROOT_PASSWORD}
+      MYSQL_USER: ${FREEPBX_DB_USER}
+      MYSQL_PASSWORD: ${FREEPBX_DB_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      - freepbx_mysql_data:/var/lib/mysql
+      - ./freepbx/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -p${FREEPBX_DB_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  freepbx:
+    image: escomputers/freepbx:17-nofail2ban
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+    ports:
+      - "${FREEPBX_HTTP_PORT}:80/tcp"
+      - "${FREEPBX_HTTPS_PORT}:443/tcp"
+      - "5060:5060/udp"
+      - "5038:5038/tcp"
+      - "10000-10100:10000-10100/udp"
+    volumes:
+      - freepbx_var_data:/var
+      - freepbx_etc_data:/etc
+      - ./freepbx/manager_custom.conf:/etc/asterisk/manager_custom.conf:ro
+    depends_on:
+      freepbx-db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  floci_data:
+  freepbx_mysql_data:
+  freepbx_var_data:
+  freepbx_etc_data:
