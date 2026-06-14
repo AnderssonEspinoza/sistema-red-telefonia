@@ -1,33 +1,57 @@
 # Sistema de Telefonia
 
-Stack local para el proyecto de central telefonica:
+Proyecto local para simular y probar una red telefonica interna usando FreePBX/Asterisk.
 
-- FreePBX + Asterisk para PBX.
-- PostgreSQL para usuarios y llamadas.
-- Backend Node/Express con REST, WebSocket, AMI opcional y circuit breaker.
-- Floci como nube local compatible con AWS/SQS y S3.
-- Dashboard React para monitoreo en tiempo real.
-- Login con token para proteger API/dashboard.
-- Observabilidad, CDR, reportes, backup y restore.
+La idea es que podamos registrar softphones, llamar entre extensiones, ver las llamadas en un dashboard y probar que el sistema aguanta fallas de algunos servicios usando circuit breaker.
 
-## Inicio
+## Que tiene
+
+- FreePBX + Asterisk para la central telefonica.
+- Extensiones SIP/PJSIP de prueba: `1001` y `1002`.
+- Backend en Node/Express.
+- Dashboard en React.
+- PostgreSQL para usuarios, llamadas y eventos.
+- Floci como nube local para SQS y S3.
+- AMI para capturar eventos reales de Asterisk.
+- CDR para comparar llamadas con el registro de FreePBX.
+- Login para el dashboard.
+- Scripts para pruebas, reporte, backup y restore.
+
+## Como levantarlo
+
+Primero copiamos las variables de ejemplo:
 
 ```bash
 cp .env.example .env
-docker compose up -d --build postgres floci backend frontend freepbx
 ```
 
-Abre el dashboard en http://localhost:5173.
+Luego levantamos todo:
 
-Credenciales locales por defecto:
+```bash
+docker compose up -d --build
+```
+
+Dashboard:
+
+```text
+http://localhost:5173
+```
+
+Login local:
 
 ```text
 admin / telefonia_admin_dev
 ```
 
-Cambialas en `.env` antes de presentar el proyecto como entorno productivo.
+Si cambian credenciales en `.env`, reinicien backend y frontend:
 
-## Trabajo en grupo
+```bash
+docker compose up -d --build backend frontend
+```
+
+## Como trabajar en grupo
+
+Clonar:
 
 ```bash
 git clone git@github.com:AnderssonEspinoza/sistema-red-telefonia.git
@@ -36,50 +60,98 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Para que otros integrantes puedan hacer `git push`, el dueno del repositorio debe agregarlos como colaboradores en GitHub o darles permisos de escritura al repositorio.
+Antes de subir cambios:
 
-La instalacion de FreePBX se ejecuta aparte:
+```bash
+git pull
+git status
+./scripts/run-smoke-tests.sh
+```
+
+No suban `.env`, `node_modules`, `dist`, `backups` ni `reports`. Ya estan ignorados en `.gitignore`.
+
+Para que alguien pueda hacer push, el dueno del repo debe agregarlo como colaborador en GitHub.
+
+## FreePBX y softphones
+
+Si FreePBX no queda listo o faltan extensiones:
 
 ```bash
 ./scripts/install-freepbx.sh
-```
-
-Crear extensiones SIP de prueba:
-
-```bash
 ./scripts/create-demo-extensions.sh
 ```
 
-Corregir audio LAN/RTP si la llamada timbra pero no se escucha:
+Extensiones de prueba:
+
+```text
+1001 / Telefonia1001
+1002 / Telefonia1002
+```
+
+En el softphone:
+
+```text
+Servidor: IP LAN de la maquina donde corre Docker
+Puerto: 5060 UDP
+Usuario: 1001 o 1002
+Password: Telefonia1001 o Telefonia1002
+```
+
+Si la llamada timbra pero no hay audio:
 
 ```bash
 ./scripts/fix-lan-audio.sh
 ```
 
-## Flujo de demostracion
+## Demo rapida
 
-1. Registra dos softphones con las extensiones `1001` y `1002`.
-2. Llama desde `1001` hacia `1002`.
-3. El dashboard muestra la llamada real capturada por AMI: ringing, answer y hangup sobre el mismo registro.
-4. El backend publica el evento en Floci SQS y guarda evidencia JSON en Floci S3.
-5. Usa `./scripts/demo-circuit-breaker.sh floci-sqs` para abrir y recuperar un circuito sin apagar todo el sistema.
-6. Genera evidencia final con `./scripts/demo-report.sh`.
-
-El sistema tambien permite simular una llamada desde el dashboard, pero la demostracion principal debe hacerse con softphones reales conectados a FreePBX/Asterisk.
-
-## Operacion
+1. Abrir el dashboard.
+2. Registrar los dos softphones.
+3. Llamar de `1001` a `1002`.
+4. Contestar y cortar.
+5. Revisar que la llamada aparezca en el dashboard.
+6. Probar una falla:
 
 ```bash
+./scripts/demo-circuit-breaker.sh floci-sqs
+```
+
+7. Generar reporte:
+
+```bash
+./scripts/demo-report.sh
+```
+
+El reporte queda en `reports/`.
+
+## Scripts utiles
+
+```bash
+./scripts/health.sh
 ./scripts/run-smoke-tests.sh
 ./scripts/demo-report.sh
 ./scripts/backup.sh
 ```
 
-Restaurar requiere confirmacion explicita:
+Restaurar backup:
 
 ```bash
 CONFIRM_RESTORE=YES ./scripts/restore.sh backups/<fecha>
 ```
 
-Mas detalles en [docs/INSTALL.md](docs/INSTALL.md).
-Guion de defensa en [docs/DEMO.md](docs/DEMO.md).
+## Puertos
+
+```text
+Dashboard:  http://localhost:5173
+Backend:    http://localhost:3000
+FreePBX:    http://localhost:8081
+Floci:      http://localhost:4566
+PostgreSQL: localhost:5432
+SIP:        5060/udp
+RTP:        10000-10100/udp
+```
+
+## Documentos
+
+- Instalacion mas detallada: [docs/INSTALL.md](docs/INSTALL.md)
+- Guion para presentar: [docs/DEMO.md](docs/DEMO.md)
