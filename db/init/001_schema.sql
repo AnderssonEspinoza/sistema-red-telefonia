@@ -45,6 +45,19 @@ CREATE TABLE IF NOT EXISTS llamada_eventos (
 
 CREATE INDEX IF NOT EXISTS idx_llamada_eventos_llamada ON llamada_eventos (llamada_id, creado_en DESC);
 
+CREATE TABLE IF NOT EXISTS auditoria_acciones (
+  id SERIAL PRIMARY KEY,
+  actor VARCHAR(100) NOT NULL,
+  accion VARCHAR(80) NOT NULL,
+  entidad VARCHAR(80),
+  entidad_id VARCHAR(100),
+  detalle JSONB,
+  creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_creado ON auditoria_acciones (creado_en DESC);
+CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_entidad ON auditoria_acciones (entidad, entidad_id);
+
 INSERT INTO usuarios (nombre, extension, procedencia, area)
 VALUES
   ('Juan Perez', '1001', 'Lima', 'Soporte'),

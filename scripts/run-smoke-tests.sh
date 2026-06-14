@@ -28,7 +28,7 @@ echo "1. Health"
 api_request GET "/api/health" | assert_json "data.ok === true"
 
 echo "2. Observability"
-api_request GET "/api/observability" | assert_json "typeof data.metrics.requestCount === 'number'"
+api_request GET "/api/observability" | assert_json "typeof data.metrics.requestCount === 'number' && Array.isArray(data.audit)"
 
 echo "3. Simular y cerrar llamada"
 CALL_ID="$(
@@ -41,8 +41,12 @@ echo "4. Circuit breaker Floci SQS"
 api_request POST "/api/demo/failures/floci-sqs" '{"enabled":true}' | assert_json "data.suppliers.some((item) => item.supplier === 'floci-sqs' && item.circuit.state === 'OPEN')"
 api_request POST "/api/demo/failures/floci-sqs" '{"enabled":false}' | assert_json "data.suppliers.some((item) => item.supplier === 'floci-sqs' && item.circuit.state === 'CLOSED')"
 
-echo "5. CDR y reporte"
+echo "5. CDR, grabaciones y auditoria"
 api_request GET "/api/cdr/reconcile?limit=5" | assert_json "Array.isArray(data.reconciliation)"
-api_request GET "/api/demo/report" | assert_json "data.system.ok === true && data.callStats.total >= 1"
+api_request GET "/api/recordings?limit=5" | assert_json "data.config.enabled === true && Array.isArray(data.recordings)"
+api_request GET "/api/audit?limit=5" | assert_json "Array.isArray(data) && data.length >= 1"
+
+echo "6. Reporte"
+api_request GET "/api/demo/report" | assert_json "data.system.ok === true && data.callStats.total >= 1 && Array.isArray(data.audit) && Array.isArray(data.recordings)"
 
 echo "Smoke tests OK"

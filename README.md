@@ -1,8 +1,8 @@
 # Sistema de Red Telefonia
 
-Sistema local de telefonia interna basado en FreePBX/Asterisk, con monitoreo de llamadas en tiempo real, persistencia de eventos, evidencias en almacenamiento compatible con S3 y circuit breaker para proveedores externos.
+Sistema local de telefonia interna basado en FreePBX/Asterisk, con monitoreo de llamadas en tiempo real, persistencia de eventos, grabacion, evidencias en almacenamiento compatible con S3 y circuit breaker para proveedores externos.
 
-El proyecto permite registrar softphones, realizar llamadas entre extensiones internas, observar el flujo de llamada desde un dashboard y validar escenarios de falla controlada sin depender de servicios cloud reales.
+El proyecto permite crear extensiones PJSIP en FreePBX desde el dashboard, registrar softphones, realizar llamadas internas, observar el flujo de llamada y validar escenarios de falla controlada sin depender de servicios cloud reales.
 
 ## Arquitectura
 
@@ -14,6 +14,8 @@ El proyecto permite registrar softphones, realizar llamadas entre extensiones in
 | Base de datos | PostgreSQL | Usuarios, llamadas y eventos procesados |
 | Cloud local | Floci | SQS para eventos y S3 para evidencias |
 | CDR | MariaDB FreePBX | Registro oficial de llamadas de Asterisk |
+| Auditoria | PostgreSQL | Acciones de operador y cambios operativos |
+| Grabaciones | FreePBX/Asterisk | Audio de llamadas enlazado con CDR |
 
 ## Requisitos
 
@@ -81,6 +83,8 @@ Extensiones de prueba:
 1002 / Telefonia1002
 ```
 
+El dashboard tambien puede crear nuevas extensiones en FreePBX. El formulario `Alta rapida` registra el usuario local, crea la extension PJSIP, activa la grabacion y muestra la clave SIP para configurar el softphone.
+
 Configuracion sugerida para softphones:
 
 ```text
@@ -102,7 +106,7 @@ Si la llamada timbra pero no hay audio:
 2. Registrar los softphones `1001` y `1002`.
 3. Realizar una llamada de `1001` a `1002`.
 4. Contestar y finalizar la llamada.
-5. Verificar en el dashboard los estados de llamada, extension, circuit breaker y evidencia.
+5. Verificar en el dashboard los estados de llamada, extension, circuit breaker, evidencia, auditoria y grabaciones.
 6. Generar el reporte de validacion:
 
 ```bash
@@ -159,6 +163,7 @@ El backup incluye:
 - Base PostgreSQL del sistema
 - Base MariaDB de FreePBX y CDR
 - Evidencias almacenadas en Floci S3
+- Grabaciones almacenadas por FreePBX
 - Archivos de configuracion relevantes
 
 ## Estructura

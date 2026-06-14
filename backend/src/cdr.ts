@@ -76,6 +76,42 @@ export async function listRecentCdr(limit = 20): Promise<CdrRecord[]> {
   }));
 }
 
+export async function listRecentCdrRecordings(limit = 20): Promise<CdrRecord[]> {
+  if (!enabled) {
+    return [];
+  }
+
+  const [rows] = await getPool().query<RowDataPacket[]>(
+    `SELECT
+       calldate,
+       src,
+       dst,
+       duration,
+       billsec,
+       disposition,
+       uniqueid,
+       linkedid,
+       recordingfile
+     FROM cdr
+     WHERE recordingfile IS NOT NULL AND recordingfile <> ''
+     ORDER BY calldate DESC
+     LIMIT ?`,
+    [limit]
+  );
+
+  return rows.map((row) => ({
+    calldate: normalizeDate(row.calldate),
+    src: String(row.src ?? ""),
+    dst: String(row.dst ?? ""),
+    duration: Number(row.duration ?? 0),
+    billsec: Number(row.billsec ?? 0),
+    disposition: String(row.disposition ?? ""),
+    uniqueid: String(row.uniqueid ?? ""),
+    linkedid: String(row.linkedid ?? ""),
+    recordingfile: String(row.recordingfile ?? "")
+  }));
+}
+
 export async function reconcileCallsWithCdr(calls: Llamada[], cdrLimit = 100) {
   const cdrRecords = await listRecentCdr(cdrLimit).catch(() => []);
 

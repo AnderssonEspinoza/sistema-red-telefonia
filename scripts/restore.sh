@@ -16,12 +16,12 @@ source .env
 set +a
 
 if [[ "${CONFIRM_RESTORE:-}" != "YES" ]]; then
-  echo "Esta operacion restaura PostgreSQL, MariaDB FreePBX y evidencias S3 desde ${BACKUP_DIR}."
+  echo "Esta operacion restaura PostgreSQL, MariaDB FreePBX, grabaciones y evidencias S3 desde ${BACKUP_DIR}."
   echo "Ejecuta con CONFIRM_RESTORE=YES para confirmar."
   exit 1
 fi
 
-docker compose up -d postgres freepbx-db floci
+docker compose up -d postgres freepbx-db floci freepbx
 
 docker compose exec -T postgres \
   psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
@@ -30,6 +30,11 @@ docker compose exec -T postgres \
 docker compose exec -T -e MYSQL_PWD="$FREEPBX_DB_ROOT_PASSWORD" freepbx-db \
   mariadb -uroot \
   < "${BACKUP_DIR}/freepbx-mariadb.sql"
+
+if [[ -f "${BACKUP_DIR}/freepbx-recordings.tar.gz" ]]; then
+  docker compose exec -T freepbx sh -lc 'mkdir -p /var/spool/asterisk'
+  docker compose exec -T freepbx tar -C /var/spool/asterisk -xzf - < "${BACKUP_DIR}/freepbx-recordings.tar.gz"
+fi
 
 if [[ -d "${BACKUP_DIR}/s3" ]]; then
   docker run --rm \

@@ -3,25 +3,28 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  Bell,
   Cloud,
-  Cpu,
   Database,
   Download,
+  FileAudio,
   FileText,
   Headphones,
+  Home,
   LogIn,
   LogOut,
+  Phone,
   PhoneCall,
   Play,
   Plus,
-  Power,
-  PowerOff,
   RadioTower,
   RefreshCw,
   Server,
+  Settings,
   Shield,
-  ShieldCheck,
+  SlidersHorizontal,
   Square,
+  UserRound,
   Users,
   Wifi,
   WifiOff
@@ -136,11 +139,48 @@ interface Health {
     host: string;
     database: string;
   };
+  provisioner: {
+    enabled: boolean;
+    configured: boolean;
+    ok: boolean;
+    error: string | null;
+    version: string | null;
+  };
+  recording: {
+    enabled: boolean;
+    path: string;
+  };
   auth: AuthConfig;
   extensions: ExtensionRuntimeStatus[];
   demoFailures: DemoFailure[];
   suppliers: SupplierStatus[];
   at: string;
+}
+
+interface RecordingSummary {
+  calldate: string;
+  src: string;
+  dst: string;
+  duration: number;
+  billsec: number;
+  disposition: string;
+  uniqueid: string;
+  linkedid: string;
+  recordingfile: string;
+  file: string;
+  available: boolean;
+  sizeBytes: number | null;
+  downloadUrl: string | null;
+}
+
+interface AuditAction {
+  id: number;
+  actor: string;
+  accion: string;
+  entidad: string | null;
+  entidad_id: string | null;
+  detalle: Record<string, unknown> | null;
+  creado_en: string;
 }
 
 interface Observability {
@@ -165,6 +205,10 @@ interface Observability {
     averageDurationSeconds: number | null;
     lastCallAt: string | null;
   };
+  cdr: Health["cdr"];
+  recording: Health["recording"];
+  recordings: RecordingSummary[];
+  audit: AuditAction[];
   events: Array<{
     id: number;
     at: string;
@@ -172,6 +216,7 @@ interface Observability {
     type: string;
     message: string;
   }>;
+  at: string;
 }
 
 interface UsuarioForm {
@@ -179,6 +224,9 @@ interface UsuarioForm {
   extension: string;
   procedencia: string;
   area: string;
+  sipSecret: string;
+  provisionFreepbx: boolean;
+  recordCalls: boolean;
 }
 
 interface LoginForm {
@@ -190,10 +238,14 @@ const emptyForm: UsuarioForm = {
   nombre: "",
   extension: "",
   procedencia: "",
-  area: ""
+  area: "",
+  sipSecret: "",
+  provisionFreepbx: true,
+  recordCalls: true
 };
 const activeCallMaxAgeMs = 8 * 60 * 60 * 1000;
 const tokenStorageKey = "telefonia_auth_token";
+const tablePageSize = 15;
 
 export function App() {
   const [authConfigState, setAuthConfigState] = useState<AuthConfig | null>(null);
@@ -207,8 +259,11 @@ export function App() {
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionRuntimeStatus[]>([]);
   const [socketState, setSocketState] = useState("CONNECTING");
   const [form, setForm] = useState<UsuarioForm>(emptyForm);
+  const [formNotice, setFormNotice] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [togglingSupplier, setTogglingSupplier] = useState<DemoSupplier | null>(null);
+  const [page, setPage] = useState(1);
 
   const activeCalls = useMemo(
     () =>
@@ -221,6 +276,10 @@ export function App() {
     [llamadas]
   );
 
+  const totalPages = Math.max(1, Math.ceil(llamadas.length / tablePageSize));
+  const visibleCalls = llamadas.slice((page - 1) * tablePageSize, page * tablePageSize);
+  const recordings = observability?.recordings ?? [];
+  const audit = observability?.audit ?? [];
   const isAuthorized = authConfigState !== null && (!authConfigState.enabled || Boolean(token));
 
   const apiFetch = useCallback(
@@ -260,11 +319,15 @@ export function App() {
 
     const [usersResponse, callsResponse, healthResponse, extensionsResponse, observabilityResponse] = await Promise.all([
       apiFetch("/api/users"),
-      apiFetch("/api/calls?limit=40"),
+      apiFetch("/api/calls?limit=80"),
       apiFetch("/api/health"),
       apiFetch("/api/extensions/status"),
       apiFetch("/api/observability")
     ]);
+
+    if (![usersResponse, callsResponse, healthResponse, extensionsResponse, observabilityResponse].every((response) => response.ok)) {
+      return;
+    }
 
     setUsuarios(await usersResponse.json());
     setLlamadas(await callsResponse.json());
@@ -280,17 +343,11 @@ export function App() {
 
     void loadData();
     const interval = window.setInterval(() => {
-      void Promise.all([apiFetch("/api/health"), apiFetch("/api/extensions/status"), apiFetch("/api/observability")])
-        .then(async ([healthResponse, extensionsResponse, observabilityResponse]) => {
-          setHealth(await healthResponse.json());
-          setExtensionStatuses(await extensionsResponse.json());
-          setObservability(await observabilityResponse.json());
-        })
-        .catch(() => undefined);
+      void loadData().catch(() => undefined);
     }, 5000);
 
     return () => window.clearInterval(interval);
-  }, [apiFetch, isAuthorized, loadData]);
+  }, [isAuthorized, loadData]);
 
   useEffect(() => {
     if (!isAuthorized) {
@@ -299,7 +356,7 @@ export function App() {
 
     let closed = false;
     let retry: number | undefined;
-    let socket: WebSocket;
+    let socket: WebSocket | null = null;
 
     const connect = () => {
       const wsUrl = authConfigState?.enabled && token ? `${WS_URL}?token=${encodeURIComponent(token)}` : WS_URL;
@@ -333,13 +390,19 @@ export function App() {
     return () => {
       closed = true;
       window.clearTimeout(retry);
-      socket.close();
+      socket?.close();
     };
   }, [authConfigState?.enabled, isAuthorized, token]);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages));
+  }, [totalPages]);
 
   async function submitUser(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
+    setFormNotice(null);
+    setFormError(null);
 
     try {
       const response = await apiFetch("/api/users", {
@@ -349,16 +412,27 @@ export function App() {
           nombre: form.nombre,
           extension: form.extension,
           procedencia: form.procedencia || null,
-          area: form.area || null
+          area: form.area || null,
+          provisionFreepbx: form.provisionFreepbx,
+          sipSecret: form.sipSecret || null,
+          recordCalls: form.recordCalls
         })
       });
+      const body = await response.json().catch(() => null);
 
       if (!response.ok) {
-        throw new Error("No se pudo registrar");
+        throw new Error(body?.error ?? "No se pudo registrar");
       }
 
       setForm(emptyForm);
+      setFormNotice(
+        body?.sipSecret
+          ? `Extension ${body.extension} creada. Clave SIP: ${body.sipSecret}`
+          : `Usuario ${body.extension} registrado`
+      );
       await loadData();
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : "No se pudo registrar");
     } finally {
       setSaving(false);
     }
@@ -373,10 +447,12 @@ export function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ extensionOrigen: origen, extensionDestino: destino })
     });
+    await loadData();
   }
 
   async function endCall(id: number) {
     await apiFetch(`/api/calls/${id}/end`, { method: "POST" });
+    await loadData();
   }
 
   async function toggleFailure(supplier: DemoSupplier, enabled: boolean) {
@@ -389,7 +465,10 @@ export function App() {
         body: JSON.stringify({ enabled })
       });
 
-      setHealth(await response.json());
+      if (response.ok) {
+        setHealth(await response.json());
+      }
+      await loadData();
     } finally {
       setTogglingSupplier(null);
     }
@@ -416,8 +495,6 @@ export function App() {
       window.localStorage.setItem(tokenStorageKey, session.token);
       setToken(session.token);
     }
-
-    await loadData();
   }
 
   function logout() {
@@ -447,13 +524,33 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
+  async function downloadRecording(recording: RecordingSummary) {
+    if (!recording.downloadUrl) {
+      return;
+    }
+
+    const response = await apiFetch(recording.downloadUrl);
+
+    if (!response.ok) {
+      return;
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = recording.file;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
   if (!authConfigState) {
     return (
       <main className="login-shell">
         <section className="login-panel">
-          <Shield size={26} />
+          <Shield size={28} />
           <h1>Sistema de Telefonia</h1>
-          <p>Inicializando seguridad...</p>
+          <p>Inicializando seguridad</p>
         </section>
       </main>
     );
@@ -463,7 +560,7 @@ export function App() {
     return (
       <main className="login-shell">
         <form className="login-panel" onSubmit={(event) => void submitLogin(event)}>
-          <Shield size={28} />
+          <Shield size={30} />
           <div>
             <p className="eyebrow">Acceso protegido</p>
             <h1>Sistema de Telefonia</h1>
@@ -495,280 +592,466 @@ export function App() {
     );
   }
 
+  const statusCards = [
+    {
+      icon: <Database size={25} />,
+      title: "PostgreSQL",
+      state: health?.db.ok ? "OK" : "FALLA",
+      leftLabel: "Latency",
+      leftValue: `${Math.round(observability?.metrics.averageRequestMs ?? 0)} ms`,
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <RadioTower size={25} />,
+      title: "Asterisk AMI",
+      state: health?.ami.connected ? "OK" : "FALLA",
+      leftLabel: "Sesiones",
+      leftValue: health?.ami.connected ? "1" : "0",
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <Cloud size={25} />,
+      title: "Floci SQS",
+      state: health?.floci.sqs.ok ? "OK" : "FALLA",
+      leftLabel: "Eventos",
+      leftValue: observability?.metrics.callEvents ?? 0,
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <FileText size={25} />,
+      title: "Floci S3",
+      state: health?.floci.s3.ok ? "OK" : "FALLA",
+      leftLabel: "Objetos",
+      leftValue: observability?.callStats.withEvidence ?? 0,
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <BarChart3 size={25} />,
+      title: "Asterisk CDR",
+      state: health?.cdr.ok ? "OK" : "FALLA",
+      leftLabel: "Registros hoy",
+      leftValue: observability?.callStats.recentTotal ?? 0,
+      rightLabel: "Grabaciones",
+      rightValue: recordings.length
+    },
+    {
+      icon: <Server size={25} />,
+      title: "WebSocket",
+      state: socketState === "CONNECTED" ? "CONECTADO" : socketState,
+      leftLabel: "Sesiones",
+      leftValue: socketState === "CONNECTED" ? "1" : "0",
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(observability?.at)
+    }
+  ];
+
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">PBX local con resiliencia</p>
+    <main className="app-frame">
+      <aside className="sidebar">
+        <div className="brand-block">
+          <div className="brand-icon">
+            <Phone size={20} />
+          </div>
+          <div>
+            <strong>PBX LOCAL</strong>
+            <span>CON RESILIENCIA</span>
+          </div>
+        </div>
+
+        <nav className="side-nav" aria-label="Principal">
+          <SidebarItem active icon={<Home size={20} />} label="Resumen" />
+          <SidebarItem icon={<PhoneCall size={20} />} label="Llamadas" />
+          <SidebarItem icon={<SlidersHorizontal size={20} />} label="Extensiones" />
+          <SidebarItem icon={<Settings size={20} />} label="Proveedores" />
+          <SidebarItem icon={<Users size={20} />} label="Usuarios" />
+          <SidebarItem icon={<FileText size={20} />} label="Reportes" />
+          <SidebarItem icon={<Bell size={20} />} label="Alertas" />
+          <SidebarItem icon={<Settings size={20} />} label="Configuracion" />
+        </nav>
+
+        <button className="operator-card" type="button" onClick={logout}>
+          <span className="operator-avatar">
+            <UserRound size={18} />
+          </span>
+          <span>
+            <strong>Operador</strong>
+            <small>Administrador</small>
+          </span>
+          {authConfigState.enabled && <LogOut size={17} />}
+        </button>
+      </aside>
+
+      <section className="workspace">
+        <header className="workspace-header">
           <h1>Sistema de Telefonia</h1>
-        </div>
-        <div className="topbar-actions">
-          <button className="secondary-button" type="button" onClick={() => void downloadReport()}>
-            <Download size={18} />
-            Reporte
-          </button>
-          <button className="icon-button" type="button" onClick={() => void loadData()} aria-label="Actualizar">
-            <RefreshCw size={18} />
-          </button>
-          <button className="primary-button" type="button" onClick={() => void simulateCall()}>
-            <Play size={18} />
-            Simular llamada
-          </button>
-          {authConfigState.enabled && (
-            <button className="icon-button" type="button" onClick={logout} aria-label="Cerrar sesion">
-              <LogOut size={18} />
+          <div className="header-actions">
+            <button className="secondary-button" type="button" onClick={() => void downloadReport()}>
+              <Download size={18} />
+              Reporte
             </button>
-          )}
-        </div>
-      </header>
-
-      <section className="status-grid" aria-label="Estado de servicios">
-        <StatusTile icon={<Database size={20} />} label="PostgreSQL" state={health?.db.ok ? "OK" : "FALLA"} />
-        <StatusTile
-          icon={<RadioTower size={20} />}
-          label="Asterisk AMI"
-          state={!health?.ami.enabled ? "OFF" : health.ami.connected ? "OK" : "FALLA"}
-        />
-        <StatusTile icon={<Cloud size={20} />} label="Floci SQS" state={health?.floci.sqs.ok ? "OK" : "FALLA"} />
-        <StatusTile icon={<FileText size={20} />} label="Floci S3" state={health?.floci.s3.ok ? "OK" : "FALLA"} />
-        <StatusTile icon={<BarChart3 size={20} />} label="Asterisk CDR" state={health?.cdr.ok ? "OK" : "FALLA"} />
-        <StatusTile icon={<Server size={20} />} label="WebSocket" state={socketState} />
-      </section>
-
-      <section className="ops-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Circuit breaker</p>
-              <h2>Proveedores</h2>
-            </div>
-            <Cpu size={20} />
+            <button className="icon-button" type="button" onClick={() => void loadData()} aria-label="Actualizar">
+              <RefreshCw size={18} />
+            </button>
+            <button className="primary-button" type="button" onClick={() => void simulateCall()}>
+              <Play size={18} />
+              Simular llamada
+            </button>
+            {authConfigState.enabled && (
+              <button className="icon-button" type="button" onClick={logout} aria-label="Cerrar sesion">
+                <LogOut size={18} />
+              </button>
+            )}
           </div>
-          <div className="circuit-list">
-            {(health?.suppliers ?? []).map((supplier) => (
-              <div className="circuit-row" key={supplier.supplier}>
-                <div className="circuit-main">
-                  <strong>{supplier.label}</strong>
-                  <span>{supplier.role}</span>
-                </div>
-                <StatusPill value={supplier.circuit.state} />
-                <span className="circuit-count">
-                  {supplier.circuit.failures}/{supplier.circuit.failureThreshold}
-                </span>
-                <button
-                  className={`toggle-button ${supplier.demoFailure ? "danger" : ""}`}
-                  type="button"
-                  disabled={togglingSupplier === supplier.supplier}
-                  onClick={() => void toggleFailure(supplier.supplier, !supplier.demoFailure)}
-                >
-                  {supplier.demoFailure ? <Power size={16} /> : <PowerOff size={16} />}
-                  {supplier.demoFailure ? "Recuperar" : "Fallar"}
-                </button>
-              </div>
-            ))}
-          </div>
+        </header>
+
+        <section className="status-grid" aria-label="Estado de servicios">
+          {statusCards.map((card) => (
+            <StatusTile key={card.title} {...card} />
+          ))}
         </section>
 
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Softphones</p>
-              <h2>Extensiones</h2>
-            </div>
-            <Headphones size={20} />
-          </div>
-          <div className="extension-list">
-            {extensionStatuses.map((extension) => (
-              <div className="extension-row" key={extension.extension}>
-                <div className="extension-code">
-                  {extension.reachable === false ? <WifiOff size={16} /> : <Wifi size={16} />}
-                  <code>{extension.extension}</code>
-                </div>
-                <div className="extension-main">
-                  <strong>{extension.nombre ?? "Extension"}</strong>
-                  <span>{extension.area ?? extension.technology}</span>
-                </div>
-                <StatusPill value={extension.status} />
-              </div>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="layout-grid">
-        <div className="panel calls-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Tiempo real</p>
-              <h2>Llamadas</h2>
-            </div>
-            <div className="counter">
-              <Activity size={16} />
-              {activeCalls.length}
-            </div>
-          </div>
-
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Origen</th>
-                  <th>Destino</th>
-                  <th>Estado</th>
-                  <th>Duracion</th>
-                  <th>Fuente</th>
-                  <th>Inicio</th>
-                  <th aria-label="Acciones" />
-                </tr>
-              </thead>
-              <tbody>
-                {llamadas.length === 0 && (
-                  <tr>
-                    <td className="empty-cell" colSpan={7}>
-                      No hay llamadas registradas.
-                    </td>
-                  </tr>
-                )}
-                {llamadas.map((call) => (
-                  <tr key={call.id}>
-                    <td>
-                      <strong>{call.nombre_origen ?? call.extension_origen ?? "N/D"}</strong>
-                      <span>{call.extension_origen ?? call.ami_linkedid ?? "sin origen"}</span>
-                    </td>
-                    <td>
-                      <strong>{call.nombre_destino ?? call.extension_destino ?? "N/D"}</strong>
-                      <span>{call.extension_destino ?? call.ultimo_evento ?? "sin destino"}</span>
-                    </td>
-                    <td>
-                      <StatusPill value={call.estado} />
-                    </td>
-                    <td>{formatDuration(call)}</td>
-                    <td>
-                      <strong>{call.fuente}</strong>
-                      <span title={call.evidencia_key ?? undefined}>{call.evidencia_key ? shortKey(call.evidencia_key) : "sin evidencia"}</span>
-                    </td>
-                    <td>{formatTime(call.fecha_inicio)}</td>
-                    <td>
-                      {!call.fecha_fin && (
-                        <button className="icon-button compact" type="button" onClick={() => void endCall(call.id)} aria-label="Finalizar llamada">
-                          <Square size={14} />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <aside className="side-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Directorio</p>
-                <h2>Usuarios</h2>
-              </div>
-              <Users size={20} />
-            </div>
-
-            <div className="user-list">
-              {usuarios.map((user) => {
-                const runtime = extensionStatuses.find((status) => status.extension === user.extension);
-
-                return (
-                  <div className="user-row" key={user.id}>
-                    <div>
-                      <strong>{user.nombre}</strong>
-                      <span>{user.area ?? "Sin area"}</span>
+        <section className="dashboard-grid">
+          <div className="main-column">
+            <section className="top-panels">
+              <Panel title="Circuit breaker - proveedores" icon={<Settings size={20} />} className="circuit-panel">
+                <div className="circuit-list">
+                  {(health?.suppliers ?? []).map((supplier) => (
+                    <div className="circuit-row" key={supplier.supplier}>
+                      <ProviderIcon supplier={supplier.supplier} />
+                      <div className="row-main">
+                        <strong>{supplier.label}</strong>
+                        <span>{supplier.role}</span>
+                      </div>
+                      <StatusPill value={supplier.circuit.state} />
+                      <span className="circuit-count">
+                        {supplier.circuit.failures}/{supplier.circuit.failureThreshold}
+                      </span>
+                      <button
+                        className="fault-button"
+                        type="button"
+                        disabled={togglingSupplier === supplier.supplier}
+                        onClick={() => void toggleFailure(supplier.supplier, !supplier.demoFailure)}
+                      >
+                        {supplier.demoFailure ? "Recuperar" : "Fallar"}
+                      </button>
                     </div>
-                    <div className="user-extension">
+                  ))}
+                </div>
+              </Panel>
+
+              <Panel title="Softphones - extensiones" icon={<Headphones size={20} />} className="softphone-panel">
+                <div className="extension-list">
+                  {extensionStatuses.map((extension) => (
+                    <div className="extension-row" key={extension.extension}>
+                      {extension.reachable === false ? <WifiOff size={17} /> : <Wifi size={17} />}
+                      <code>{extension.extension}</code>
+                      <div className="row-main">
+                        <strong>{extension.nombre ?? "Extension"}</strong>
+                        <span>{extension.area ?? extension.technology}</span>
+                      </div>
+                      <StatusPill value={extension.reachable === false ? "NO DISPONIBLE" : extension.status} />
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            </section>
+
+            <Panel
+              title="Tiempo real - llamadas"
+              icon={
+                <span className="live-counter">
+                  <Activity size={18} />
+                  {activeCalls.length}
+                </span>
+              }
+              className="calls-panel"
+            >
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Origen</th>
+                      <th>Destino</th>
+                      <th>Estado</th>
+                      <th>Duracion</th>
+                      <th>Fuente</th>
+                      <th>Evidencia</th>
+                      <th>Inicio</th>
+                      <th>Accion</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleCalls.length === 0 && (
+                      <tr>
+                        <td className="empty-cell" colSpan={8}>
+                          No hay llamadas registradas.
+                        </td>
+                      </tr>
+                    )}
+                    {visibleCalls.map((call) => (
+                      <tr key={call.id}>
+                        <td>
+                          <strong>{call.nombre_origen ?? call.extension_origen ?? "N/D"}</strong>
+                          <span>{call.extension_origen ?? call.ami_linkedid ?? "sin origen"}</span>
+                        </td>
+                        <td>
+                          <strong>{call.nombre_destino ?? call.extension_destino ?? "N/D"}</strong>
+                          <span>{call.extension_destino ?? call.ultimo_evento ?? "sin destino"}</span>
+                        </td>
+                        <td>
+                          <StatusPill value={call.estado} />
+                        </td>
+                        <td>{formatDuration(call)}</td>
+                        <td>
+                          <strong>{call.fuente}</strong>
+                          <span>{call.ultimo_evento ?? "sin evento"}</span>
+                        </td>
+                        <td>
+                          <span title={call.evidencia_key ?? undefined}>
+                            {call.evidencia_key ? shortKey(call.evidencia_key) : "sin evidencia"}
+                          </span>
+                        </td>
+                        <td>{formatTime(call.fecha_inicio)}</td>
+                        <td>
+                          {!call.fecha_fin && (
+                            <button
+                              className="icon-button compact"
+                              type="button"
+                              onClick={() => void endCall(call.id)}
+                              aria-label="Finalizar llamada"
+                            >
+                              <Square size={14} />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="table-footer">
+                <span>
+                  Mostrando {visibleCalls.length === 0 ? 0 : (page - 1) * tablePageSize + 1} a{" "}
+                  {Math.min(page * tablePageSize, llamadas.length)} de {llamadas.length} llamadas
+                </span>
+                <div className="pager">
+                  <button type="button" disabled={page === 1} onClick={() => setPage((current) => current - 1)}>
+                    &laquo;
+                  </button>
+                  <button type="button" className="active">
+                    {page}
+                  </button>
+                  <button type="button" disabled={page === totalPages} onClick={() => setPage((current) => current + 1)}>
+                    &raquo;
+                  </button>
+                  <span>{tablePageSize} por pagina</span>
+                </div>
+                <span>Actualizado: {formatTime(observability?.at)}</span>
+              </div>
+            </Panel>
+          </div>
+
+          <aside className="right-column">
+            <Panel title="Directorio - usuarios" icon={<Users size={20} />}>
+              <div className="user-list">
+                {usuarios.map((user) => {
+                  const runtime = extensionStatuses.find((status) => status.extension === user.extension);
+
+                  return (
+                    <div className="user-row" key={user.id}>
+                      <div className="row-main">
+                        <strong>{user.nombre}</strong>
+                        <span>{user.area ?? user.procedencia ?? "Sin area"}</span>
+                      </div>
                       <code>{user.extension}</code>
-                      {runtime?.reachable === true && <ShieldCheck className="good-icon" size={14} />}
-                      {runtime?.reachable === false && <AlertTriangle className="warn-icon" size={14} />}
+                      {runtime?.reachable === false && <AlertTriangle className="warn-icon" size={18} />}
+                    </div>
+                  );
+                })}
+              </div>
+            </Panel>
+
+            <Panel title="Observabilidad - operacion" icon={<BarChart3 size={20} />}>
+              <div className="metric-list">
+                <MetricRow label="Requests" value={observability?.metrics.requestCount ?? 0} />
+                <MetricRow label="Errores API" value={observability?.metrics.errorCount ?? 0} />
+                <MetricRow label="Eventos llamada" value={observability?.metrics.callEvents ?? 0} />
+                <MetricRow label="Evidencias 24h" value={`${observability?.callStats.recentEvidenceCoveragePercent ?? 0}%`} />
+                <MetricRow label="Grabaciones" value={recordings.length} />
+                <MetricRow label="Provisionador" value={health?.provisioner.ok ? "OK" : "FALLA"} />
+              </div>
+            </Panel>
+
+            <Panel title="Grabaciones - CDR" icon={<FileAudio size={20} />}>
+              <div className="recording-list">
+                {recordings.length === 0 && <p className="empty-note">Sin grabaciones registradas.</p>}
+                {recordings.slice(0, 4).map((recording) => (
+                  <div className="recording-row" key={`${recording.uniqueid}-${recording.file}`}>
+                    <div className="row-main">
+                      <strong>
+                        {recording.src} {"->"} {recording.dst}
+                      </strong>
+                      <span>{recording.file}</span>
+                    </div>
+                    <button
+                      className="icon-button compact"
+                      type="button"
+                      disabled={!recording.available}
+                      onClick={() => void downloadRecording(recording)}
+                      aria-label="Descargar grabacion"
+                    >
+                      <Download size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+
+            <Panel title="Auditoria - acciones" icon={<Shield size={20} />}>
+              <div className="audit-list">
+                {audit.slice(0, 5).map((item) => (
+                  <div className="audit-row" key={item.id}>
+                    <StatusPill value={auditTone(item.accion)} />
+                    <div className="row-main">
+                      <strong>{auditLabel(item.accion)}</strong>
+                      <span>
+                        {item.actor} - {formatTime(item.creado_en)}
+                      </span>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Observabilidad</p>
-                <h2>Operacion</h2>
+                ))}
               </div>
-              <BarChart3 size={20} />
-            </div>
-            <div className="metric-list">
-              <MetricRow label="Requests" value={observability?.metrics.requestCount ?? 0} />
-              <MetricRow label="Errores API" value={observability?.metrics.errorCount ?? 0} />
-              <MetricRow label="Eventos llamada" value={observability?.metrics.callEvents ?? 0} />
-              <MetricRow label="Evidencias 24h" value={`${observability?.callStats.recentEvidenceCoveragePercent ?? 0}%`} />
-            </div>
-            <div className="event-list">
-              {(observability?.events ?? []).slice(0, 3).map((event) => (
-                <div className="event-row" key={event.id}>
-                  <StatusPill value={event.level} />
-                  <span>{event.message}</span>
+            </Panel>
+
+            <Panel title="Alta rapida - registrar" icon={<PhoneCall size={20} />}>
+              <form className="user-form" onSubmit={(event) => void submitUser(event)}>
+                <label>
+                  Nombre
+                  <input
+                    required
+                    placeholder="Nombre del usuario"
+                    value={form.nombre}
+                    onChange={(event) => setForm((current) => ({ ...current, nombre: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  Extension
+                  <input
+                    required
+                    inputMode="numeric"
+                    pattern="[0-9]{2,10}"
+                    placeholder="Ej. 1003"
+                    value={form.extension}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        extension: event.target.value,
+                        sipSecret:
+                          current.sipSecret === "" || current.sipSecret === `Telefonia${current.extension}`
+                            ? `Telefonia${event.target.value}`
+                            : current.sipSecret
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Clave SIP
+                  <input
+                    required={form.provisionFreepbx}
+                    placeholder="Telefonia1003"
+                    value={form.sipSecret}
+                    onChange={(event) => setForm((current) => ({ ...current, sipSecret: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  Procedencia
+                  <input
+                    placeholder="Ej. Soporte"
+                    value={form.procedencia}
+                    onChange={(event) => setForm((current) => ({ ...current, procedencia: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  Area
+                  <input
+                    placeholder="Ej. Soporte Tecnico"
+                    value={form.area}
+                    onChange={(event) => setForm((current) => ({ ...current, area: event.target.value }))}
+                  />
+                </label>
+                <div className="switch-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={form.provisionFreepbx}
+                      onChange={(event) => setForm((current) => ({ ...current, provisionFreepbx: event.target.checked }))}
+                    />
+                    Crear extension en FreePBX
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={form.recordCalls}
+                      onChange={(event) => setForm((current) => ({ ...current, recordCalls: event.target.checked }))}
+                    />
+                    Grabar llamadas
+                  </label>
                 </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Alta rapida</p>
-                <h2>Registrar</h2>
-              </div>
-              <PhoneCall size={20} />
-            </div>
-
-            <form className="user-form" onSubmit={(event) => void submitUser(event)}>
-              <label>
-                Nombre
-                <input
-                  required
-                  value={form.nombre}
-                  onChange={(event) => setForm((current) => ({ ...current, nombre: event.target.value }))}
-                />
-              </label>
-              <label>
-                Extension
-                <input
-                  required
-                  inputMode="numeric"
-                  pattern="[0-9]{2,10}"
-                  value={form.extension}
-                  onChange={(event) => setForm((current) => ({ ...current, extension: event.target.value }))}
-                />
-              </label>
-              <label>
-                Procedencia
-                <input
-                  value={form.procedencia}
-                  onChange={(event) => setForm((current) => ({ ...current, procedencia: event.target.value }))}
-                />
-              </label>
-              <label>
-                Area
-                <input
-                  value={form.area}
-                  onChange={(event) => setForm((current) => ({ ...current, area: event.target.value }))}
-                />
-              </label>
-              <button className="primary-button full" type="submit" disabled={saving}>
-                <Plus size={18} />
-                Registrar
-              </button>
-            </form>
-          </section>
-        </aside>
+                {formNotice && <p className="form-success">{formNotice}</p>}
+                {formError && <p className="form-error">{formError}</p>}
+                <button className="primary-button full" type="submit" disabled={saving}>
+                  <Plus size={18} />
+                  Registrar
+                </button>
+              </form>
+            </Panel>
+          </aside>
+        </section>
       </section>
     </main>
   );
+}
+
+function SidebarItem({ active = false, icon, label }: { active?: boolean; icon: ReactNode; label: string }) {
+  return (
+    <button className={`side-link ${active ? "active" : ""}`} type="button">
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function Panel({ title, icon, className = "", children }: { title: string; icon: ReactNode; className?: string; children: ReactNode }) {
+  return (
+    <section className={`panel ${className}`}>
+      <div className="panel-header">
+        <h2>{title}</h2>
+        {icon}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function ProviderIcon({ supplier }: { supplier: DemoSupplier }) {
+  if (supplier === "postgres") {
+    return <Database className="provider-icon" size={27} />;
+  }
+
+  if (supplier === "ami") {
+    return <RadioTower className="provider-icon orange" size={27} />;
+  }
+
+  if (supplier === "floci-sqs") {
+    return <Cloud className="provider-icon green" size={27} />;
+  }
+
+  return <FileText className="provider-icon dark" size={27} />;
 }
 
 function MetricRow({ label, value }: { label: string; value: string | number }) {
@@ -780,13 +1063,41 @@ function MetricRow({ label, value }: { label: string; value: string | number }) 
   );
 }
 
-function StatusTile({ icon, label, state }: { icon: ReactNode; label: string; state: string | undefined }) {
+function StatusTile({
+  icon,
+  title,
+  state,
+  leftLabel,
+  leftValue,
+  rightLabel,
+  rightValue
+}: {
+  icon: ReactNode;
+  title: string;
+  state: string | undefined;
+  leftLabel: string;
+  leftValue: string | number;
+  rightLabel: string;
+  rightValue: string | number;
+}) {
   return (
     <div className="status-tile">
-      <div className="status-icon">{icon}</div>
-      <div>
-        <span>{label}</span>
-        <strong className={statusClass(state)}>{state ?? "..."}</strong>
+      <div className="tile-main">
+        <div className="status-icon">{icon}</div>
+        <div>
+          <strong>{title}</strong>
+          <span className={statusClass(state)}>{state ?? "..."}</span>
+        </div>
+      </div>
+      <div className="tile-meta">
+        <span>
+          {leftLabel}
+          <strong>{leftValue}</strong>
+        </span>
+        <span>
+          {rightLabel}
+          <strong>{rightValue}</strong>
+        </span>
       </div>
     </div>
   );
@@ -803,7 +1114,22 @@ function statusClass(value: string | undefined) {
 
   const normalized = value.toUpperCase();
 
-  if (["OK", "CONNECTED", "ANSWERED", "COMPLETED", "CLOSED", "REACHABLE", "REGISTERED", "NOT_INUSE", "INUSE", "INFO"].includes(normalized)) {
+  if (
+    [
+      "OK",
+      "CONNECTED",
+      "CONECTADO",
+      "ANSWERED",
+      "COMPLETED",
+      "CLOSED",
+      "REACHABLE",
+      "REGISTERED",
+      "NOT_INUSE",
+      "INUSE",
+      "INFO",
+      "DISPONIBLE"
+    ].includes(normalized)
+  ) {
     return "good";
   }
 
@@ -811,7 +1137,22 @@ function statusClass(value: string | undefined) {
     return "warn";
   }
 
-  if (["FALLA", "ERROR", "DISCONNECTED", "OPEN", "HANGUP", "BUSY", "NOANSWER", "UNAVAILABLE", "UNREACHABLE", "UNREGISTERED"].includes(normalized)) {
+  if (
+    [
+      "FALLA",
+      "ERROR",
+      "DISCONNECTED",
+      "OPEN",
+      "HANGUP",
+      "BUSY",
+      "NOANSWER",
+      "UNAVAILABLE",
+      "UNREACHABLE",
+      "UNREGISTERED",
+      "NO DISPONIBLE",
+      "FAILED"
+    ].includes(normalized)
+  ) {
     return "bad";
   }
 
@@ -821,14 +1162,18 @@ function statusClass(value: string | undefined) {
 function upsertById<T extends { id: number }>(items: T[], item: T): T[] {
   const exists = items.some((current) => current.id === item.id);
   const next = exists ? items.map((current) => (current.id === item.id ? item : current)) : [item, ...items];
-  return next.slice(0, 50);
+  return next.slice(0, 80);
 }
 
 function byExtension(a: Usuario, b: Usuario) {
   return a.extension.localeCompare(b.extension);
 }
 
-function formatTime(value: string) {
+function formatTime(value: string | null | undefined) {
+  if (!value) {
+    return "--:--";
+  }
+
   return new Intl.DateTimeFormat("es-PE", {
     hour: "2-digit",
     minute: "2-digit",
@@ -855,4 +1200,30 @@ function formatDuration(call: Llamada) {
 function shortKey(value: string) {
   const parts = value.split("/");
   return parts.slice(-2).join("/");
+}
+
+function auditTone(action: string) {
+  if (action.includes("failed") || action.includes("failure.enabled")) {
+    return "WARN";
+  }
+
+  if (action.includes("created") || action.includes("login")) {
+    return "INFO";
+  }
+
+  return "OK";
+}
+
+function auditLabel(action: string) {
+  const labels: Record<string, string> = {
+    "auth.login": "Inicio de sesion",
+    "auth.failed": "Login fallido",
+    "user.created": "Usuario creado",
+    "call.closed.manual": "Llamada cerrada",
+    "call.simulated": "Llamada simulada",
+    "supplier.failure.enabled": "Falla activada",
+    "supplier.failure.disabled": "Falla recuperada"
+  };
+
+  return labels[action] ?? action;
 }

@@ -47,6 +47,16 @@ export interface Llamada {
   raw_event: Record<string, unknown> | null;
 }
 
+export interface AuditAction {
+  id: number;
+  actor: string;
+  accion: string;
+  entidad: string | null;
+  entidad_id: string | null;
+  detalle: Record<string, unknown> | null;
+  creado_en: string;
+}
+
 export interface NuevaLlamada {
   extensionOrigen?: string | null;
   extensionDestino?: string | null;
@@ -111,6 +121,21 @@ export async function ensureSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_llamada_eventos_llamada
       ON llamada_eventos (llamada_id, creado_en DESC);
+
+    CREATE TABLE IF NOT EXISTS auditoria_acciones (
+      id SERIAL PRIMARY KEY,
+      actor VARCHAR(100) NOT NULL,
+      accion VARCHAR(80) NOT NULL,
+      entidad VARCHAR(80),
+      entidad_id VARCHAR(100),
+      detalle JSONB,
+      creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_creado
+      ON auditoria_acciones (creado_en DESC);
+    CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_entidad
+      ON auditoria_acciones (entidad, entidad_id);
   `);
 }
 
@@ -143,6 +168,40 @@ export async function createUsuario(input: {
      VALUES ($1, $2, $3, $4)
      RETURNING *`,
     [input.nombre, input.extension, input.procedencia ?? null, input.area ?? null]
+  );
+
+  return result.rows[0];
+}
+
+export async function listAuditActions(limit = 50): Promise<AuditAction[]> {
+  const result = await pool.query<AuditAction>(
+    `SELECT *
+     FROM auditoria_acciones
+     ORDER BY creado_en DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows;
+}
+
+export async function recordAuditAction(input: {
+  actor: string;
+  accion: string;
+  entidad?: string | null;
+  entidadId?: string | number | null;
+  detalle?: Record<string, unknown> | null;
+}): Promise<AuditAction> {
+  const result = await pool.query<AuditAction>(
+    `INSERT INTO auditoria_acciones (actor, accion, entidad, entidad_id, detalle)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [
+      input.actor,
+      input.accion,
+      input.entidad ?? null,
+      input.entidadId === undefined || input.entidadId === null ? null : String(input.entidadId),
+      input.detalle ?? null
+    ]
   );
 
   return result.rows[0];

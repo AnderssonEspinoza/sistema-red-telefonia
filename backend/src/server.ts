@@ -6,7 +6,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { checkAmi, getExtensionStatuses, setAmiCircuitDemo, startAmiListener } from "./ami.js";
 import { authConfig, login, requireAuth, verifyToken } from "./auth.js";
-import { checkCdr, listRecentCdr, reconcileCallsWithCdr } from "./cdr.js";
+import { checkCdr, listRecentCdr, listRecentCdrRecordings, reconcileCallsWithCdr } from "./cdr.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
 import {
   checkDatabase,
@@ -14,9 +14,12 @@ import {
   createUsuario,
   ensureSchema,
   finalizarLlamada,
+  findUsuarioByExtension,
   getCallStats,
+  listAuditActions,
   listLlamadas,
   listUsuarios,
+  recordAuditAction,
   setLlamadaEvidence,
   type Llamada,
   upsertAmiLlamada
@@ -42,6 +45,12 @@ import {
   recordOperationalEvent,
   requestMetrics
 } from "./observability.js";
+import {
+  checkFreepbxProvisioner,
+  freepbxProvisionerConfig,
+  provisionFreepbxExtension
+} from "./freepbxProvisioner.js";
+import { enrichRecordings, recordingConfig, resolveRecordingFile } from "./recordings.js";
 
 const port = Number(process.env.PORT ?? 3000);
 const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
@@ -59,7 +68,16 @@ const usuarioSchema = z.object({
   nombre: z.string().min(2).max(100),
   extension: z.string().regex(/^\d{2,10}$/),
   procedencia: z.string().max(100).optional().nullable(),
-  area: z.string().max(100).optional().nullable()
+  area: z.string().max(100).optional().nullable(),
+  provisionFreepbx: z.boolean().default(true),
+  sipSecret: z
+    .string()
+    .min(8)
+    .max(80)
+    .regex(/^[A-Za-z0-9_.@#-]+$/)
+    .optional()
+    .nullable(),
+  recordCalls: z.boolean().default(true)
 });
 
 const simulateCallSchema = z.object({
@@ -100,9 +118,21 @@ app.post("/api/auth/login", (request, response, next) => {
     const input = loginSchema.parse(request.body);
     const session = login(input);
     recordOperationalEvent("INFO", "auth.login", "Inicio de sesion exitoso", { username: session.username });
+    void writeAudit(request, {
+      actor: session.username,
+      accion: "auth.login",
+      entidad: "session",
+      detalle: { username: session.username }
+    });
     response.json({ ...session, auth: authConfig() });
   } catch (error) {
     recordOperationalEvent("WARN", "auth.failed", "Intento de login fallido");
+    void writeAudit(request, {
+      actor: "anonimo",
+      accion: "auth.failed",
+      entidad: "session",
+      detalle: { username: request.body?.username ?? null }
+    });
 
     if (error instanceof z.ZodError) {
       next(error);
@@ -128,15 +158,63 @@ app.get("/api/system", async (_request, response) => {
 });
 
 app.get("/api/observability", async (_request, response) => {
-  const [stats, cdr] = await Promise.all([getCallStats(), checkCdr()]);
+  const [stats, cdr, audit, recordings] = await Promise.all([
+    getCallStats(),
+    checkCdr(),
+    listAuditActions(20),
+    listRecentCdrRecordings(20)
+      .then((records) => enrichRecordings(records))
+      .catch(() => [])
+  ]);
 
   response.json({
     metrics: metricsSnapshot(),
     callStats: stats,
     cdr,
+    recording: recordingConfig(),
+    recordings,
+    audit,
     events: listOperationalEvents(60),
     at: new Date().toISOString()
   });
+});
+
+app.get("/api/audit", async (request, response, next) => {
+  try {
+    const limit = Number(request.query.limit ?? 50);
+    response.json(await listAuditActions(Number.isFinite(limit) ? limit : 50));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/recordings", async (request, response, next) => {
+  try {
+    const limit = Number(request.query.limit ?? 20);
+    const records = await listRecentCdrRecordings(Number.isFinite(limit) ? limit : 20);
+    response.json({
+      config: recordingConfig(),
+      recordings: await enrichRecordings(records),
+      at: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/recordings/:filename", async (request, response, next) => {
+  try {
+    const recording = await resolveRecordingFile(request.params.filename, String(request.query.date ?? ""));
+
+    if (!recording) {
+      response.status(404).json({ error: "Grabacion no encontrada" });
+      return;
+    }
+
+    response.download(recording.path, recording.filename);
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/cdr/reconcile", async (request, response, next) => {
@@ -182,6 +260,12 @@ app.post("/api/demo/failures/:supplier", async (request, response, next) => {
       supplier,
       enabled
     });
+    void writeAudit(request, {
+      accion: enabled ? "supplier.failure.enabled" : "supplier.failure.disabled",
+      entidad: "supplier",
+      entidadId: supplier,
+      detalle: { supplier, enabled }
+    });
     response.json(await buildSystemStatus());
   } catch (error) {
     next(error);
@@ -199,9 +283,44 @@ app.get("/api/users", async (_request, response, next) => {
 app.post("/api/users", async (request, response, next) => {
   try {
     const input = usuarioSchema.parse(request.body);
-    const usuario = await createUsuario(input);
+    const existing = await findUsuarioByExtension(input.extension);
+
+    if (existing) {
+      response.status(409).json({ error: "La extension ya existe" });
+      return;
+    }
+
+    const sipSecret = input.sipSecret?.trim() || `Telefonia${input.extension}`;
+    const provisioning = input.provisionFreepbx
+      ? await provisionFreepbxExtension({
+          extension: input.extension,
+          name: input.nombre,
+          secret: sipSecret,
+          recording: input.recordCalls
+        })
+      : null;
+    const usuario = await createUsuario({
+      nombre: input.nombre,
+      extension: input.extension,
+      procedencia: input.procedencia,
+      area: input.area
+    });
+
+    void writeAudit(request, {
+      accion: "user.created",
+      entidad: "usuario",
+      entidadId: usuario.id,
+      detalle: {
+        extension: usuario.extension,
+        nombre: usuario.nombre,
+        area: usuario.area,
+        provisionFreepbx: input.provisionFreepbx,
+        recording: input.recordCalls,
+        provisioning
+      }
+    });
     broadcast("USER_CREATED", usuario);
-    response.status(201).json(usuario);
+    response.status(201).json({ ...usuario, provisioning, sipSecret: input.provisionFreepbx ? sipSecret : null });
   } catch (error) {
     next(error);
   }
@@ -232,6 +351,16 @@ app.post("/api/calls/:id/end", async (request, response, next) => {
       fuente: llamada.fuente,
       evidenciaKey: llamada.evidencia_key
     });
+    void writeAudit(request, {
+      accion: "call.closed.manual",
+      entidad: "llamada",
+      entidadId: llamada.id,
+      detalle: {
+        estado: llamada.estado,
+        extensionOrigen: llamada.extension_origen,
+        extensionDestino: llamada.extension_destino
+      }
+    });
     broadcast("CALL_UPDATED", llamada);
     response.json(llamada);
   } catch (error) {
@@ -252,6 +381,16 @@ app.post("/api/simulate-call", async (request, response, next) => {
       rawEvent: { type: "SIMULATED_CALL", correlationId: simulatedId }
     });
 
+    void writeAudit(request, {
+      accion: "call.simulated",
+      entidad: "llamada",
+      entidadId: llamada.id,
+      detalle: {
+        extensionOrigen: input.extensionOrigen,
+        extensionDestino: input.extensionDestino,
+        evidenciaKey: llamada.evidencia_key
+      }
+    });
     response.status(201).json(llamada);
   } catch (error) {
     next(error);
@@ -350,16 +489,24 @@ function broadcast(type: string, payload: unknown) {
 }
 
 async function buildSystemStatus() {
-  const [db, floci, ami, cdr] = await Promise.all([checkDatabaseWithCircuit(), checkFloci(), checkAmi(), checkCdr()]);
+  const [db, floci, ami, cdr, provisioner] = await Promise.all([
+    checkDatabaseWithCircuit(),
+    checkFloci(),
+    checkAmi(),
+    checkCdr(),
+    checkFreepbxProvisioner()
+  ]);
   const extensions = getExtensionStatuses();
 
   return {
     service: "telefonia-backend",
-    ok: db.ok && floci.ok && ami.ok,
+    ok: db.ok && floci.ok && ami.ok && provisioner.ok,
     db,
     floci,
     ami,
     cdr,
+    provisioner,
+    recording: recordingConfig(),
     auth: authConfig(),
     extensions,
     demoFailures: listDemoFailures(),
@@ -374,12 +521,16 @@ async function buildSystemStatus() {
 }
 
 async function buildDemoReport() {
-  const [system, callStats, recentCalls, extensions, recentCdr] = await Promise.all([
+  const [system, callStats, recentCalls, extensions, recentCdr, recordings, audit] = await Promise.all([
     buildSystemStatus(),
     getCallStats(),
     listLlamadas(20),
     buildExtensionStatus(),
-    listRecentCdr(20).catch(() => [])
+    listRecentCdr(20).catch(() => []),
+    listRecentCdrRecordings(30)
+      .then((records) => enrichRecordings(records))
+      .catch(() => []),
+    listAuditActions(100)
   ]);
   const reconciliation = await reconcileCallsWithCdr(recentCalls);
 
@@ -392,10 +543,16 @@ async function buildDemoReport() {
     extensions,
     recentCalls,
     recentCdr,
+    recordings,
     reconciliation,
     observability: {
       metrics: metricsSnapshot(),
       events: listOperationalEvents(100)
+    },
+    audit,
+    freepbxProvisioning: {
+      provisioner: freepbxProvisionerConfig(),
+      recording: recordingConfig()
     },
     evidence: {
       bucket: system.floci.bucketName,
@@ -495,6 +652,41 @@ function setSupplierCircuitState(supplier: DemoSupplier, open: boolean) {
 
 function isDatabaseConflict(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
+}
+
+async function writeAudit(
+  request: express.Request,
+  input: {
+    actor?: string;
+    accion: string;
+    entidad?: string | null;
+    entidadId?: string | number | null;
+    detalle?: Record<string, unknown> | null;
+  }
+) {
+  const user = responseUser(request);
+
+  try {
+    await recordAuditAction({
+      actor: input.actor ?? user ?? "sistema",
+      accion: input.accion,
+      entidad: input.entidad,
+      entidadId: input.entidadId,
+      detalle: {
+        ...(input.detalle ?? {}),
+        ip: request.ip,
+        userAgent: request.headers["user-agent"] ?? null
+      }
+    });
+  } catch (error) {
+    recordOperationalEvent("WARN", "audit.failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function responseUser(request: express.Request) {
+  const response = request.res as express.Response | undefined;
+  const user = response?.locals.user as { username?: string } | undefined;
+  return user?.username ?? null;
 }
 
 await ensureSchema();

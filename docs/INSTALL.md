@@ -16,6 +16,7 @@ docker compose up -d --build postgres floci backend frontend freepbx
 ```
 
 El backend migra el esquema de PostgreSQL al iniciar. Tambien crea la cola `call-events` en Floci SQS y el bucket `telefonia-evidencias` en Floci S3.
+FreePBX monta un provisionador interno protegido por token para crear extensiones PJSIP desde el dashboard.
 
 ## Acceso
 
@@ -33,6 +34,16 @@ AUTH_ENABLED=true
 AUTH_USERNAME=admin
 AUTH_PASSWORD=telefonia_admin_dev
 AUTH_TOKEN_SECRET=telefonia_local_secret_change_me
+```
+
+Provisionamiento y grabaciones:
+
+```text
+FREEPBX_PROVISIONER_ENABLED=true
+FREEPBX_PROVISIONER_URL=http://freepbx/provisioner.php
+FREEPBX_PROVISIONER_TOKEN=telefonia_provisioner_dev
+CALL_RECORDING_ENABLED=true
+ASTERISK_RECORDINGS_PATH=/freepbx-var/spool/asterisk/monitor
 ```
 
 Para una entrega formal cambia `AUTH_PASSWORD` y `AUTH_TOKEN_SECRET`, luego reinicia backend/frontend.
@@ -59,6 +70,8 @@ Extensiones creadas:
 1001 / Telefonia1001
 1002 / Telefonia1002
 ```
+
+Desde el dashboard se pueden crear extensiones adicionales. El backend llama al provisionador de FreePBX, crea el usuario PJSIP, activa grabacion y luego registra el usuario en PostgreSQL.
 
 Si las llamadas timbran pero no hay audio, aplica la configuracion LAN/RTP:
 
@@ -110,6 +123,7 @@ Extension 1002 / Password Telefonia1002
 ```
 
 Llama de `1001` a `1002`. En el dashboard deben verse los cambios de estado capturados por AMI y una referencia de evidencia S3 en la tabla de llamadas.
+Cuando la llamada es contestada, FreePBX genera CDR y archivo de grabacion. El panel `Grabaciones - CDR` muestra los archivos que Asterisk reporta en `recordingfile`.
 
 ## Circuit breaker
 
@@ -140,6 +154,8 @@ Endpoints utiles:
 GET  /api/health
 GET  /api/extensions/status
 GET  /api/observability
+GET  /api/audit
+GET  /api/recordings
 GET  /api/cdr/reconcile
 GET  /api/demo/report
 POST /api/demo/failures/:supplier
@@ -163,7 +179,7 @@ Backup:
 ./scripts/backup.sh
 ```
 
-Incluye PostgreSQL, MariaDB de FreePBX/CDR, configuracion relevante y evidencias S3.
+Incluye PostgreSQL, MariaDB de FreePBX/CDR, grabaciones, configuracion relevante y evidencias S3.
 
 Restore:
 

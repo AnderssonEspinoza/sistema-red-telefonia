@@ -25,6 +25,10 @@ cp compose.yaml "${BACKUP_DIR}/compose.yaml"
 cp .env "${BACKUP_DIR}/env.snapshot"
 cp freepbx/manager_custom.conf "${BACKUP_DIR}/manager_custom.conf"
 
+docker compose exec -T freepbx sh -lc \
+  'test -d /var/spool/asterisk/monitor && tar -C /var/spool/asterisk -czf - monitor || true' \
+  > "${BACKUP_DIR}/freepbx-recordings.tar.gz"
+
 mkdir -p "${BACKUP_DIR}/s3"
 docker run --rm \
   --network sistema-telefonia_default \
@@ -41,6 +45,7 @@ Backup generado: $(date -Iseconds)
 Contenido:
 - postgres.sql: usuarios, llamadas y eventos.
 - freepbx-mariadb.sql: configuracion FreePBX y CDR.
+- freepbx-recordings.tar.gz: grabaciones de /var/spool/asterisk/monitor.
 - s3/: evidencias JSON de Floci S3.
 - env.snapshot: variables usadas al momento del backup.
 
