@@ -45,6 +45,7 @@ import {
   recordOperationalEvent,
   requestMetrics
 } from "./observability.js";
+import { sliConfig } from "./sli.js";
 import {
   checkFreepbxProvisioner,
   freepbxProvisionerConfig,
@@ -169,6 +170,7 @@ app.get("/api/observability", async (_request, response) => {
 
   response.json({
     metrics: metricsSnapshot(),
+    sli: sliConfig(),
     callStats: stats,
     cdr,
     recording: recordingConfig(),
@@ -176,6 +178,16 @@ app.get("/api/observability", async (_request, response) => {
     audit,
     events: listOperationalEvents(60),
     at: new Date().toISOString()
+  });
+});
+
+app.get("/api/sli/ping", (_request, response) => {
+  response.setHeader("Cache-Control", "no-store");
+  response.json({
+    ok: true,
+    service: "telefonia-backend",
+    receivedAt: new Date().toISOString(),
+    sli: sliConfig().localLatency
   });
 });
 
@@ -505,6 +517,7 @@ async function buildSystemStatus() {
     floci,
     ami,
     cdr,
+    sli: sliConfig(),
     provisioner,
     recording: recordingConfig(),
     auth: authConfig(),
@@ -553,6 +566,11 @@ async function buildDemoReport() {
     freepbxProvisioning: {
       provisioner: freepbxProvisionerConfig(),
       recording: recordingConfig()
+    },
+    reliability: {
+      sli: system.sli,
+      note:
+        "El SLI de latencia local se mide desde el navegador del dashboard hacia /api/sli/ping; el backend publica el SLO y el dashboard calcula cumplimiento con muestras recientes."
     },
     evidence: {
       bucket: system.floci.bucketName,

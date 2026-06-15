@@ -52,6 +52,7 @@ let lastEventAt: string | null = null;
 let lastError: string | null = null;
 let lastEndpointSnapshotAt = 0;
 let reconnectTimer: NodeJS.Timeout | null = null;
+let activeHandler: AmiHandler | null = null;
 
 export function getAmiStatus(): AmiStatus {
   return {
@@ -69,6 +70,10 @@ export function getAmiStatus(): AmiStatus {
 export async function checkAmi(): Promise<AmiStatus> {
   if (!enabled) {
     return getAmiStatus();
+  }
+
+  if (!connected && activeHandler) {
+    scheduleReconnect(activeHandler);
   }
 
   try {
@@ -110,10 +115,12 @@ export function startAmiListener(handler: AmiHandler) {
     return;
   }
 
+  activeHandler = handler;
   connect(handler);
 }
 
 function connect(handler: AmiHandler) {
+  socket?.destroy();
   socket = net.createConnection({ host, port });
   socket.setEncoding("utf8");
 
@@ -148,7 +155,10 @@ function connect(handler: AmiHandler) {
 
   socket.on("error", (error) => {
     lastError = error.message;
+    connected = false;
     circuit.failure();
+    socket?.destroy();
+    scheduleReconnect(handler);
   });
 
   socket.on("close", () => {

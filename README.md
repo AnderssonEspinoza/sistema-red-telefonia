@@ -1,6 +1,6 @@
 # Sistema de Red Telefonia
 
-Sistema local de telefonia interna basado en FreePBX/Asterisk, con monitoreo de llamadas en tiempo real, persistencia de eventos, grabacion, evidencias en almacenamiento compatible con S3 y circuit breaker para proveedores externos.
+Sistema local de telefonia interna basado en FreePBX/Asterisk, con monitoreo de llamadas en tiempo real, persistencia de eventos, SLI/SLO de latencia local, grabacion, evidencias en almacenamiento compatible con S3 y circuit breaker para proveedores externos.
 
 El proyecto permite crear extensiones PJSIP en FreePBX desde el dashboard, registrar softphones, realizar llamadas internas, observar el flujo de llamada y validar escenarios de falla controlada sin depender de servicios cloud reales.
 
@@ -16,6 +16,7 @@ El proyecto permite crear extensiones PJSIP en FreePBX desde el dashboard, regis
 | CDR | MariaDB FreePBX | Registro oficial de llamadas de Asterisk |
 | Auditoria | PostgreSQL | Acciones de operador y cambios operativos |
 | Grabaciones | FreePBX/Asterisk | Audio de llamadas enlazado con CDR |
+| SLI/SLO | Dashboard + Backend | Latencia local dashboard -> API y umbral de degradacion |
 
 ## Requisitos
 
@@ -106,7 +107,7 @@ Si la llamada timbra pero no hay audio:
 2. Registrar los softphones `1001` y `1002`.
 3. Realizar una llamada de `1001` a `1002`.
 4. Contestar y finalizar la llamada.
-5. Verificar en el dashboard los estados de llamada, extension, circuit breaker, evidencia, auditoria y grabaciones.
+5. Verificar en el dashboard los estados de llamada, extension, SLI/SLO, circuit breaker, evidencia, auditoria y grabaciones.
 6. Generar el reporte de validacion:
 
 ```bash

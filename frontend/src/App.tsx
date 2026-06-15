@@ -8,6 +8,7 @@ import {
   Download,
   FileAudio,
   FileText,
+  Gauge,
   Headphones,
   Home,
   LogIn,
@@ -138,6 +139,7 @@ interface Health {
     host: string;
     database: string;
   };
+  sli: SliConfig;
   provisioner: {
     enabled: boolean;
     configured: boolean;
@@ -154,6 +156,23 @@ interface Health {
   demoFailures: DemoFailure[];
   suppliers: SupplierStatus[];
   at: string;
+}
+
+interface SliConfig {
+  localLatency: {
+    name: string;
+    description: string;
+    sloMs: number;
+    targetPercent: number;
+    sampleWindow: number;
+  };
+}
+
+interface LocalLatencySample {
+  id: number;
+  at: string;
+  roundTripMs: number;
+  ok: boolean;
 }
 
 interface RecordingSummary {
@@ -193,6 +212,7 @@ interface Observability {
     lastRequestAt: string | null;
     lastCallEventAt: string | null;
   };
+  sli: SliConfig;
   callStats: {
     total: number;
     active: number;
@@ -245,6 +265,13 @@ const emptyForm: UsuarioForm = {
 const activeCallMaxAgeMs = 8 * 60 * 60 * 1000;
 const tokenStorageKey = "telefonia_auth_token";
 const tablePageSize = 15;
+const defaultSliConfig: SliConfig["localLatency"] = {
+  name: "dashboard_to_backend_rtt_ms",
+  description: "Tiempo de ida y vuelta desde el dashboard hacia la API local.",
+  sloMs: 200,
+  targetPercent: 99,
+  sampleWindow: 20
+};
 
 export function App() {
   const [authConfigState, setAuthConfigState] = useState<AuthConfig | null>(null);
@@ -264,6 +291,7 @@ export function App() {
   const [togglingSupplier, setTogglingSupplier] = useState<DemoSupplier | null>(null);
   const [page, setPage] = useState(1);
   const [activeNav, setActiveNav] = useState("resumen");
+  const [latencySamples, setLatencySamples] = useState<LocalLatencySample[]>([]);
 
   const activeCalls = useMemo(
     () =>
@@ -281,6 +309,11 @@ export function App() {
   const recordings = observability?.recordings ?? [];
   const audit = observability?.audit ?? [];
   const isAuthorized = authConfigState !== null && (!authConfigState.enabled || Boolean(token));
+  const localLatencyConfig = observability?.sli.localLatency ?? health?.sli.localLatency ?? defaultSliConfig;
+  const localLatencySli = useMemo(
+    () => buildLocalLatencySli(latencySamples, localLatencyConfig),
+    [latencySamples, localLatencyConfig]
+  );
 
   const apiFetch = useCallback(
     async (path: string, init: RequestInit = {}) => {
@@ -336,6 +369,23 @@ export function App() {
     setObservability(await observabilityResponse.json());
   }, [apiFetch, isAuthorized]);
 
+  const probeLocalLatency = useCallback(async () => {
+    if (!isAuthorized) {
+      return;
+    }
+
+    const started = performance.now();
+
+    try {
+      const response = await apiFetch(`/api/sli/ping?ts=${Date.now()}`, { cache: "no-store" });
+      const roundTripMs = Math.max(1, Math.round(performance.now() - started));
+      recordLatencySample(roundTripMs, response.ok && roundTripMs <= localLatencyConfig.sloMs);
+    } catch {
+      const roundTripMs = Math.max(localLatencyConfig.sloMs + 1, Math.round(performance.now() - started));
+      recordLatencySample(roundTripMs, false);
+    }
+  }, [apiFetch, isAuthorized, localLatencyConfig.sampleWindow, localLatencyConfig.sloMs]);
+
   useEffect(() => {
     if (!isAuthorized) {
       return undefined;
@@ -348,6 +398,19 @@ export function App() {
 
     return () => window.clearInterval(interval);
   }, [isAuthorized, loadData]);
+
+  useEffect(() => {
+    if (!isAuthorized) {
+      return undefined;
+    }
+
+    void probeLocalLatency();
+    const interval = window.setInterval(() => {
+      void probeLocalLatency();
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [isAuthorized, probeLocalLatency]);
 
   useEffect(() => {
     if (!isAuthorized) {
@@ -505,6 +568,7 @@ export function App() {
     setHealth(null);
     setObservability(null);
     setExtensionStatuses([]);
+    setLatencySamples([]);
   }
 
   async function downloadReport() {
@@ -542,6 +606,20 @@ export function App() {
     anchor.download = recording.file;
     anchor.click();
     URL.revokeObjectURL(url);
+  }
+
+  function recordLatencySample(roundTripMs: number, ok: boolean) {
+    setLatencySamples((current) =>
+      [
+        {
+          id: Date.now(),
+          at: new Date().toISOString(),
+          roundTripMs,
+          ok
+        },
+        ...current
+      ].slice(0, localLatencyConfig.sampleWindow)
+    );
   }
 
   if (!authConfigState) {
@@ -601,6 +679,15 @@ export function App() {
       leftValue: `${Math.round(observability?.metrics.averageRequestMs ?? 0)} ms`,
       rightLabel: "Ultima verificacion",
       rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <Gauge size={25} />,
+      title: "SLI Local",
+      state: localLatencySli.state,
+      leftLabel: "P95 RTT",
+      leftValue: localLatencySli.p95Ms === null ? "--" : `${localLatencySli.p95Ms} ms`,
+      rightLabel: "SLO",
+      rightValue: `<= ${localLatencyConfig.sloMs} ms`
     },
     {
       icon: <RadioTower size={25} />,
@@ -669,6 +756,7 @@ export function App() {
 
         <nav className="side-nav" aria-label="Principal">
           <SidebarItem active={activeNav === "resumen"} icon={<Home size={20} />} label="Resumen" onClick={() => navigateToSection("resumen")} />
+          <SidebarItem active={activeNav === "sli"} icon={<Gauge size={20} />} label="SLI/SLO" onClick={() => navigateToSection("sli")} />
           <SidebarItem active={activeNav === "llamadas"} icon={<PhoneCall size={20} />} label="Llamadas" onClick={() => navigateToSection("llamadas")} />
           <SidebarItem active={activeNav === "extensiones"} icon={<SlidersHorizontal size={20} />} label="Extensiones" onClick={() => navigateToSection("extensiones")} />
           <SidebarItem active={activeNav === "proveedores"} icon={<Settings size={20} />} label="Proveedores" onClick={() => navigateToSection("proveedores")} />
@@ -879,6 +967,18 @@ export function App() {
                     </div>
                   );
                 })}
+              </div>
+            </Panel>
+
+            <Panel id="sli" title="SLI/SLO - latencia local" icon={<Gauge size={20} />}>
+              <div className="metric-list">
+                <MetricRow label="Estado" value={localLatencySli.state} />
+                <MetricRow label="Ultima muestra" value={localLatencySli.lastMs === null ? "--" : `${localLatencySli.lastMs} ms`} />
+                <MetricRow label="Promedio" value={localLatencySli.averageMs === null ? "--" : `${localLatencySli.averageMs} ms`} />
+                <MetricRow label="P95" value={localLatencySli.p95Ms === null ? "--" : `${localLatencySli.p95Ms} ms`} />
+                <MetricRow label="P99" value={localLatencySli.p99Ms === null ? "--" : `${localLatencySli.p99Ms} ms`} />
+                <MetricRow label="Cumplimiento" value={`${localLatencySli.withinSloPercent}%`} />
+                <MetricRow label="SLO" value={`${localLatencyConfig.targetPercent}% <= ${localLatencyConfig.sloMs} ms`} />
               </div>
             </Panel>
 
@@ -1161,7 +1261,7 @@ function statusClass(value: string | undefined) {
     return "good";
   }
 
-  if (["OFF", "CONNECTING", "RINGING", "HALF_OPEN", "NEWCHANNEL", "UNKNOWN", "WARN"].includes(normalized)) {
+  if (["OFF", "CONNECTING", "RINGING", "HALF_OPEN", "NEWCHANNEL", "UNKNOWN", "WARN", "SIN DATOS"].includes(normalized)) {
     return "warn";
   }
 
@@ -1178,7 +1278,9 @@ function statusClass(value: string | undefined) {
       "UNREACHABLE",
       "UNREGISTERED",
       "NO DISPONIBLE",
-      "FAILED"
+      "FAILED",
+      "DEGRADADO",
+      "INCUMPLE"
     ].includes(normalized)
   ) {
     return "bad";
@@ -1191,6 +1293,38 @@ function upsertById<T extends { id: number }>(items: T[], item: T): T[] {
   const exists = items.some((current) => current.id === item.id);
   const next = exists ? items.map((current) => (current.id === item.id ? item : current)) : [item, ...items];
   return next.slice(0, 80);
+}
+
+function buildLocalLatencySli(samples: LocalLatencySample[], config: SliConfig["localLatency"]) {
+  const values = samples.map((sample) => sample.roundTripMs);
+  const okCount = samples.filter((sample) => sample.ok).length;
+  const withinSloPercent = samples.length > 0 ? Math.round((okCount / samples.length) * 100) : 0;
+  const p95Ms = percentile(values, 0.95);
+  const p99Ms = percentile(values, 0.99);
+  const averageMs = values.length > 0 ? Math.round(values.reduce((total, value) => total + value, 0) / values.length) : null;
+  const lastMs = samples[0]?.roundTripMs ?? null;
+  const degraded =
+    samples.length > 0 &&
+    ((p95Ms !== null && p95Ms > config.sloMs) || withinSloPercent < config.targetPercent);
+
+  return {
+    lastMs,
+    averageMs,
+    p95Ms,
+    p99Ms,
+    withinSloPercent,
+    state: samples.length === 0 ? "SIN DATOS" : degraded ? "DEGRADADO" : "OK"
+  };
+}
+
+function percentile(values: number[], ratio: number) {
+  if (values.length === 0) {
+    return null;
+  }
+
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.ceil(sorted.length * ratio) - 1;
+  return sorted[Math.min(sorted.length - 1, Math.max(0, index))];
 }
 
 function byExtension(a: Usuario, b: Usuario) {

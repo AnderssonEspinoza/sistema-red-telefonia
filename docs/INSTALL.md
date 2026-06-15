@@ -8,6 +8,8 @@
 - FreePBX: http://localhost:8081
 - PostgreSQL: localhost:5432
 
+Si `5432` ya esta ocupado en la maquina local, cambia `POSTGRES_PORT` en `.env`, por ejemplo `POSTGRES_PORT=5433`. El backend dentro de Docker sigue usando `postgres:5432`.
+
 ## Arranque principal
 
 ```bash
@@ -44,6 +46,9 @@ FREEPBX_PROVISIONER_URL=http://freepbx/provisioner.php
 FREEPBX_PROVISIONER_TOKEN=telefonia_provisioner_dev
 CALL_RECORDING_ENABLED=true
 ASTERISK_RECORDINGS_PATH=/freepbx-var/spool/asterisk/monitor
+LOCAL_LATENCY_SLO_MS=200
+LOCAL_LATENCY_TARGET_PERCENT=99
+LOCAL_LATENCY_SAMPLE_WINDOW=20
 ```
 
 Para una entrega formal cambia `AUTH_PASSWORD` y `AUTH_TOKEN_SECRET`, luego reinicia backend/frontend.
@@ -154,6 +159,7 @@ Endpoints utiles:
 GET  /api/health
 GET  /api/extensions/status
 GET  /api/observability
+GET  /api/sli/ping
 GET  /api/audit
 GET  /api/recordings
 GET  /api/cdr/reconcile

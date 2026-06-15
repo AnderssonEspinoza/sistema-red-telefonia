@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-Demostrar una red telefonica interna real con FreePBX/Asterisk, monitoreo de llamadas por AMI, persistencia en PostgreSQL, publicacion en Floci SQS, evidencias JSON en Floci S3, CDR, grabacion, auditoria, observabilidad, seguridad y circuit breaker por proveedor.
+Demostrar una red telefonica interna real con FreePBX/Asterisk, monitoreo de llamadas por AMI, persistencia en PostgreSQL, publicacion en Floci SQS, evidencias JSON en Floci S3, CDR, grabacion, auditoria, SLI/SLO de latencia local, observabilidad, seguridad y circuit breaker por proveedor.
 
 ## Preparacion
 
@@ -51,6 +51,7 @@ Resultado esperado:
 - AMI aparece conectado.
 - La llamada se actualiza sobre una sola fila: `RINGING`, `ANSWERED`, `HANGUP`.
 - La tabla muestra duracion, fuente `ami`, cantidad de eventos y evidencia S3.
+- El panel `SLI/SLO - latencia local` muestra RTT dashboard -> API, P95/P99, cumplimiento y SLO configurado.
 - Si la llamada fue contestada, FreePBX genera CDR y archivo de grabacion.
 - Las extensiones aparecen con estado de registro o actividad.
 - El reporte de demo cruza las llamadas recientes con CDR cuando Asterisk ya genero registros.
@@ -87,6 +88,7 @@ El reporte queda en `reports/demo-*.json` e incluye:
 - CDR recientes y reconciliacion con llamadas AMI.
 - Grabaciones enlazadas con CDR.
 - Auditoria de acciones de operador.
+- SLI/SLO de latencia local publicado por backend y calculado con muestras del dashboard.
 - Estado de seguridad.
 
 ## Recuperacion
@@ -103,6 +105,7 @@ El backup demuestra operacion real: base de datos del proyecto, base de FreePBX/
 - AMI entrega eventos de Asterisk al backend en tiempo real.
 - El alta de extensiones desde el dashboard usa FreePBX real, no una tabla simulada.
 - Las grabaciones dependen de CDR/FreePBX y quedan disponibles como evidencia operativa.
+- El SLI no es una metrica decorativa: se mide desde el cliente web hacia la API y cambia el estado visual si se supera el SLO.
 - PostgreSQL conserva usuarios, llamadas y eventos historicos por llamada.
 - PostgreSQL tambien conserva auditoria de acciones sensibles.
 - Floci SQS representa mensajeria asincrona de nube local.
