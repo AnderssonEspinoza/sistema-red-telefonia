@@ -1,4 +1,11 @@
-export type DemoSupplier = "postgres" | "ami" | "floci-sqs" | "floci-s3";
+export type DemoSupplier =
+  | "postgres"
+  | "ami"
+  | "floci-sqs"
+  | "floci-s3"
+  | "dialer"
+  | "transcription"
+  | "metrics";
 
 export interface DemoFailureState {
   supplier: DemoSupplier;
@@ -6,7 +13,7 @@ export interface DemoFailureState {
   since: string | null;
 }
 
-const suppliers: DemoSupplier[] = ["postgres", "ami", "floci-sqs", "floci-s3"];
+const suppliers: DemoSupplier[] = ["postgres", "ami", "floci-sqs", "floci-s3", "dialer", "transcription", "metrics"];
 const state = new Map<DemoSupplier, string>();
 
 export function setDemoFailure(supplier: DemoSupplier, enabled: boolean) {

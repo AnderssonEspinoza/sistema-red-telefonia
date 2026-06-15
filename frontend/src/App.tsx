@@ -8,7 +8,6 @@ import {
   Download,
   FileAudio,
   FileText,
-  Gauge,
   Headphones,
   Home,
   LogIn,
@@ -33,7 +32,7 @@ import {
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3000";
 
-type DemoSupplier = "postgres" | "ami" | "floci-sqs" | "floci-s3";
+type DemoSupplier = "postgres" | "ami" | "floci-sqs" | "floci-s3" | "dialer" | "transcription" | "metrics";
 
 interface Usuario {
   id: number;
@@ -88,6 +87,100 @@ interface DemoFailure {
   since: string | null;
 }
 
+interface CallCenterConfig {
+  dialerUrl: string;
+  transcriptionUrl: string;
+  metricsUrl: string;
+  defaultAgentExtension: string;
+  stateStore: string;
+  transcriptStore: string;
+  asteriskControl: string;
+  security: {
+    sensitiveMasking: string;
+    transcriptEncryption: string;
+    recordingEncryptionMode: string;
+    voiceSegmentation: string;
+  };
+}
+
+interface CallCenterServiceStatus {
+  supplier: DemoSupplier;
+  label: string;
+  role: string;
+  ok: boolean;
+  error: string | null;
+  circuit: CircuitSnapshot;
+}
+
+interface CallCenterHealth {
+  ok: boolean;
+  config: CallCenterConfig;
+  services: CallCenterServiceStatus[];
+}
+
+interface CallCenterMetrics {
+  leadsTotal: number;
+  leadsPending: number;
+  callsTotal: number;
+  callsDialing: number;
+  callsAnswered: number;
+  callsFailed: number;
+  answerRatePercent: number;
+  transcriptsTotal: number;
+  salesOpportunities: number;
+  sensitiveMasked: number;
+  averageQualityScore: number;
+}
+
+interface CallCenterLead {
+  id: string;
+  name: string;
+  phone: string;
+  priority: string | number;
+  status: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+interface CallCenterTranscript {
+  _id: string;
+  callId: string;
+  leadName: string | null;
+  agentExtension: string | null;
+  recordingFile: string | null;
+  maskedText: string;
+  sensitiveDataMasked: boolean;
+  sensitiveHits: number;
+  recordingSecurity?: {
+    mode: string;
+    encryptedArchiveReady: boolean;
+    sha256: string;
+  };
+  analysis: {
+    opportunity: boolean;
+    opportunityScore: number;
+    qualityScore: number;
+    keywords: string[];
+    objections: string[];
+    summary: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface CallCenterOverview {
+  health: CallCenterHealth;
+  metrics: CallCenterMetrics | null;
+  leads: {
+    pending: number;
+    leads: CallCenterLead[];
+  };
+  transcripts: {
+    transcripts: CallCenterTranscript[];
+  };
+  at: string;
+}
+
 interface ExtensionRuntimeStatus {
   extension: string;
   nombre?: string;
@@ -140,6 +233,7 @@ interface Health {
     database: string;
   };
   sli: SliConfig;
+  callCenter: CallCenterHealth;
   provisioner: {
     enabled: boolean;
     configured: boolean;
@@ -166,13 +260,6 @@ interface SliConfig {
     targetPercent: number;
     sampleWindow: number;
   };
-}
-
-interface LocalLatencySample {
-  id: number;
-  at: string;
-  roundTripMs: number;
-  ok: boolean;
 }
 
 interface RecordingSummary {
@@ -225,6 +312,7 @@ interface Observability {
     lastCallAt: string | null;
   };
   cdr: Health["cdr"];
+  callCenter: CallCenterHealth | null;
   recording: Health["recording"];
   recordings: RecordingSummary[];
   audit: AuditAction[];
@@ -265,13 +353,6 @@ const emptyForm: UsuarioForm = {
 const activeCallMaxAgeMs = 8 * 60 * 60 * 1000;
 const tokenStorageKey = "telefonia_auth_token";
 const tablePageSize = 15;
-const defaultSliConfig: SliConfig["localLatency"] = {
-  name: "dashboard_to_backend_rtt_ms",
-  description: "Tiempo de ida y vuelta desde el dashboard hacia la API local.",
-  sloMs: 200,
-  targetPercent: 99,
-  sampleWindow: 20
-};
 
 export function App() {
   const [authConfigState, setAuthConfigState] = useState<AuthConfig | null>(null);
@@ -282,16 +363,20 @@ export function App() {
   const [llamadas, setLlamadas] = useState<Llamada[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
   const [observability, setObservability] = useState<Observability | null>(null);
+  const [callCenter, setCallCenter] = useState<CallCenterOverview | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionRuntimeStatus[]>([]);
   const [socketState, setSocketState] = useState("CONNECTING");
   const [form, setForm] = useState<UsuarioForm>(emptyForm);
   const [formNotice, setFormNotice] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [dialingLead, setDialingLead] = useState(false);
+  const [analyzingText, setAnalyzingText] = useState(false);
+  const [callCenterNotice, setCallCenterNotice] = useState<string | null>(null);
+  const [callCenterError, setCallCenterError] = useState<string | null>(null);
   const [togglingSupplier, setTogglingSupplier] = useState<DemoSupplier | null>(null);
   const [page, setPage] = useState(1);
   const [activeNav, setActiveNav] = useState("resumen");
-  const [latencySamples, setLatencySamples] = useState<LocalLatencySample[]>([]);
 
   const activeCalls = useMemo(
     () =>
@@ -309,11 +394,6 @@ export function App() {
   const recordings = observability?.recordings ?? [];
   const audit = observability?.audit ?? [];
   const isAuthorized = authConfigState !== null && (!authConfigState.enabled || Boolean(token));
-  const localLatencyConfig = observability?.sli.localLatency ?? health?.sli.localLatency ?? defaultSliConfig;
-  const localLatencySli = useMemo(
-    () => buildLocalLatencySli(latencySamples, localLatencyConfig),
-    [latencySamples, localLatencyConfig]
-  );
 
   const apiFetch = useCallback(
     async (path: string, init: RequestInit = {}) => {
@@ -350,15 +430,20 @@ export function App() {
       return;
     }
 
-    const [usersResponse, callsResponse, healthResponse, extensionsResponse, observabilityResponse] = await Promise.all([
+    const [usersResponse, callsResponse, healthResponse, extensionsResponse, observabilityResponse, callCenterResponse] = await Promise.all([
       apiFetch("/api/users"),
       apiFetch("/api/calls?limit=80"),
       apiFetch("/api/health"),
       apiFetch("/api/extensions/status"),
-      apiFetch("/api/observability")
+      apiFetch("/api/observability"),
+      apiFetch("/api/call-center/overview")
     ]);
 
-    if (![usersResponse, callsResponse, healthResponse, extensionsResponse, observabilityResponse].every((response) => response.ok)) {
+    if (
+      ![usersResponse, callsResponse, healthResponse, extensionsResponse, observabilityResponse, callCenterResponse].every(
+        (response) => response.ok
+      )
+    ) {
       return;
     }
 
@@ -367,24 +452,8 @@ export function App() {
     setHealth(await healthResponse.json());
     setExtensionStatuses(await extensionsResponse.json());
     setObservability(await observabilityResponse.json());
+    setCallCenter(await callCenterResponse.json());
   }, [apiFetch, isAuthorized]);
-
-  const probeLocalLatency = useCallback(async () => {
-    if (!isAuthorized) {
-      return;
-    }
-
-    const started = performance.now();
-
-    try {
-      const response = await apiFetch(`/api/sli/ping?ts=${Date.now()}`, { cache: "no-store" });
-      const roundTripMs = Math.max(1, Math.round(performance.now() - started));
-      recordLatencySample(roundTripMs, response.ok && roundTripMs <= localLatencyConfig.sloMs);
-    } catch {
-      const roundTripMs = Math.max(localLatencyConfig.sloMs + 1, Math.round(performance.now() - started));
-      recordLatencySample(roundTripMs, false);
-    }
-  }, [apiFetch, isAuthorized, localLatencyConfig.sampleWindow, localLatencyConfig.sloMs]);
 
   useEffect(() => {
     if (!isAuthorized) {
@@ -398,19 +467,6 @@ export function App() {
 
     return () => window.clearInterval(interval);
   }, [isAuthorized, loadData]);
-
-  useEffect(() => {
-    if (!isAuthorized) {
-      return undefined;
-    }
-
-    void probeLocalLatency();
-    const interval = window.setInterval(() => {
-      void probeLocalLatency();
-    }, 5000);
-
-    return () => window.clearInterval(interval);
-  }, [isAuthorized, probeLocalLatency]);
 
   useEffect(() => {
     if (!isAuthorized) {
@@ -567,8 +623,75 @@ export function App() {
     setLlamadas([]);
     setHealth(null);
     setObservability(null);
+    setCallCenter(null);
     setExtensionStatuses([]);
-    setLatencySamples([]);
+  }
+
+  async function dialNextLeadAction() {
+    setDialingLead(true);
+    setCallCenterNotice(null);
+    setCallCenterError(null);
+
+    try {
+      const agentExtension = callCenter?.health.config.defaultAgentExtension ?? health?.callCenter.config.defaultAgentExtension ?? "1001";
+      const response = await apiFetch("/api/call-center/dial-next", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentExtension })
+      });
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(body?.detail ?? body?.error ?? "No se pudo iniciar la marcacion");
+      }
+
+      setCallCenterNotice(
+        body?.ok
+          ? `Marcacion enviada a Asterisk para ${body?.lead?.name ?? "lead"} desde agente ${agentExtension}.`
+          : body?.message ?? "No hay leads pendientes para marcar."
+      );
+      await loadData();
+    } catch (error) {
+      setCallCenterError(error instanceof Error ? error.message : "No se pudo iniciar la marcacion");
+    } finally {
+      setDialingLead(false);
+    }
+  }
+
+  async function analyzeDemoText() {
+    setAnalyzingText(true);
+    setCallCenterNotice(null);
+    setCallCenterError(null);
+
+    try {
+      const response = await apiFetch("/api/call-center/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callId: `demo-${Date.now()}`,
+          leadName: "Cliente demo",
+          agentExtension: callCenter?.health.config.defaultAgentExtension ?? "1001",
+          text:
+            "El cliente pide precio, demo y plan empresarial. Menciona la tarjeta 4111 1111 1111 1111 para validar el enmascaramiento automatico."
+        })
+      });
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(body?.error ?? "No se pudo analizar la llamada");
+      }
+
+      setCallCenterNotice(
+        body?.transcript?.analysis?.opportunity
+          ? "Transcripcion guardada en MongoDB: oportunidad comercial detectada y datos sensibles enmascarados."
+          : "Transcripcion guardada en MongoDB."
+      );
+      await loadData();
+    } catch (error) {
+      setCallCenterError(error instanceof Error ? error.message : "No se pudo analizar la llamada");
+    } finally {
+      setAnalyzingText(false);
+    }
   }
 
   async function downloadReport() {
@@ -606,20 +729,6 @@ export function App() {
     anchor.download = recording.file;
     anchor.click();
     URL.revokeObjectURL(url);
-  }
-
-  function recordLatencySample(roundTripMs: number, ok: boolean) {
-    setLatencySamples((current) =>
-      [
-        {
-          id: Date.now(),
-          at: new Date().toISOString(),
-          roundTripMs,
-          ok
-        },
-        ...current
-      ].slice(0, localLatencyConfig.sampleWindow)
-    );
   }
 
   if (!authConfigState) {
@@ -670,6 +779,12 @@ export function App() {
     );
   }
 
+  const callCenterMetrics = callCenter?.metrics;
+  const leads = callCenter?.leads.leads ?? [];
+  const transcripts = callCenter?.transcripts.transcripts ?? [];
+  const callCenterHealth = callCenter?.health ?? health?.callCenter ?? observability?.callCenter ?? null;
+  const callCenterState = callCenterHealth ? (callCenterHealth.ok ? "OK" : "FALLA") : undefined;
+
   const statusCards = [
     {
       icon: <Database size={25} />,
@@ -681,15 +796,6 @@ export function App() {
       rightValue: formatTime(health?.at)
     },
     {
-      icon: <Gauge size={25} />,
-      title: "SLI Local",
-      state: localLatencySli.state,
-      leftLabel: "P95 RTT",
-      leftValue: localLatencySli.p95Ms === null ? "--" : `${localLatencySli.p95Ms} ms`,
-      rightLabel: "SLO",
-      rightValue: `<= ${localLatencyConfig.sloMs} ms`
-    },
-    {
       icon: <RadioTower size={25} />,
       title: "Asterisk AMI",
       state: health?.ami.connected ? "OK" : "FALLA",
@@ -697,6 +803,15 @@ export function App() {
       leftValue: health?.ami.connected ? "1" : "0",
       rightLabel: "Ultima verificacion",
       rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <PhoneCall size={25} />,
+      title: "Call Center IA",
+      state: callCenterState,
+      leftLabel: "Leads pendientes",
+      leftValue: callCenterMetrics?.leadsPending ?? callCenter?.leads.pending ?? 0,
+      rightLabel: "Oportunidades",
+      rightValue: callCenterMetrics?.salesOpportunities ?? 0
     },
     {
       icon: <Cloud size={25} />,
@@ -756,7 +871,7 @@ export function App() {
 
         <nav className="side-nav" aria-label="Principal">
           <SidebarItem active={activeNav === "resumen"} icon={<Home size={20} />} label="Resumen" onClick={() => navigateToSection("resumen")} />
-          <SidebarItem active={activeNav === "sli"} icon={<Gauge size={20} />} label="SLI/SLO" onClick={() => navigateToSection("sli")} />
+          <SidebarItem active={activeNav === "callcenter"} icon={<PhoneCall size={20} />} label="Call Center" onClick={() => navigateToSection("callcenter")} />
           <SidebarItem active={activeNav === "llamadas"} icon={<PhoneCall size={20} />} label="Llamadas" onClick={() => navigateToSection("llamadas")} />
           <SidebarItem active={activeNav === "extensiones"} icon={<SlidersHorizontal size={20} />} label="Extensiones" onClick={() => navigateToSection("extensiones")} />
           <SidebarItem active={activeNav === "proveedores"} icon={<Settings size={20} />} label="Proveedores" onClick={() => navigateToSection("proveedores")} />
@@ -789,9 +904,9 @@ export function App() {
             <button className="icon-button" type="button" onClick={() => void loadData()} aria-label="Actualizar">
               <RefreshCw size={18} />
             </button>
-            <button className="primary-button" type="button" onClick={() => void simulateCall()}>
+            <button className="primary-button" type="button" disabled={dialingLead} onClick={() => void dialNextLeadAction()}>
               <Play size={18} />
-              Simular llamada
+              Marcar lead
             </button>
             {authConfigState.enabled && (
               <button className="icon-button" type="button" onClick={logout} aria-label="Cerrar sesion">
@@ -852,6 +967,74 @@ export function App() {
                 </div>
               </Panel>
             </section>
+
+            <Panel id="callcenter" title="Call center - ventas y calidad" icon={<PhoneCall size={20} />} className="callcenter-panel">
+              <div className="callcenter-overview">
+                <div className="callcenter-kpis">
+                  <MetricCard label="Leads pendientes" value={callCenterMetrics?.leadsPending ?? callCenter?.leads.pending ?? 0} />
+                  <MetricCard label="Marcaciones" value={callCenterMetrics?.callsTotal ?? 0} />
+                  <MetricCard label="Contestadas" value={`${callCenterMetrics?.answerRatePercent ?? 0}%`} />
+                  <MetricCard label="Oportunidades" value={callCenterMetrics?.salesOpportunities ?? 0} />
+                  <MetricCard label="Calidad promedio" value={`${callCenterMetrics?.averageQualityScore ?? 0}/100`} />
+                  <MetricCard label="Datos enmascarados" value={callCenterMetrics?.sensitiveMasked ?? 0} />
+                </div>
+                <div className="callcenter-actions">
+                  <button className="primary-button full" type="button" disabled={dialingLead} onClick={() => void dialNextLeadAction()}>
+                    <Play size={18} />
+                    {dialingLead ? "Marcando" : "Marcar siguiente lead"}
+                  </button>
+                  <button className="secondary-button full" type="button" disabled={analyzingText} onClick={() => void analyzeDemoText()}>
+                    <FileText size={18} />
+                    {analyzingText ? "Analizando" : "Analizar texto demo"}
+                  </button>
+                  <button className="secondary-button full" type="button" onClick={() => void simulateCall()}>
+                    <Activity size={18} />
+                    Registrar llamada demo
+                  </button>
+                </div>
+              </div>
+
+              {(callCenterNotice || callCenterError) && (
+                <div className="callcenter-message">
+                  {callCenterNotice && <p className="form-success">{callCenterNotice}</p>}
+                  {callCenterError && <p className="form-error">{callCenterError}</p>}
+                </div>
+              )}
+
+              <div className="callcenter-detail-grid">
+                <div className="lead-list">
+                  <h3>Cola de leads</h3>
+                  {leads.length === 0 && <p className="empty-note">Sin leads cargados.</p>}
+                  {leads.slice(0, 4).map((lead) => (
+                    <div className="lead-row" key={lead.id}>
+                      <div className="row-main">
+                        <strong>{lead.name}</strong>
+                        <span>
+                          {lead.phone} - prioridad {lead.priority}
+                        </span>
+                      </div>
+                      <StatusPill value={lead.status} />
+                    </div>
+                  ))}
+                </div>
+                <div className="transcript-list">
+                  <h3>Analisis de llamadas</h3>
+                  {transcripts.length === 0 && <p className="empty-note">Sin transcripciones registradas.</p>}
+                  {transcripts.slice(0, 3).map((transcript) => (
+                    <div className="transcript-row" key={transcript._id}>
+                      <div className="row-main">
+                        <strong>{transcript.leadName ?? transcript.callId}</strong>
+                        <span>{transcript.analysis.summary}</span>
+                      </div>
+                      <div className="transcript-tags">
+                        <StatusPill value={transcript.analysis.opportunity ? "OPORTUNIDAD" : "SIN OPORTUNIDAD"} />
+                        {transcript.sensitiveDataMasked && <StatusPill value="ENMASCARADO" />}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </Panel>
 
             <Panel
               title="Tiempo real - llamadas"
@@ -970,18 +1153,6 @@ export function App() {
               </div>
             </Panel>
 
-            <Panel id="sli" title="SLI/SLO - latencia local" icon={<Gauge size={20} />}>
-              <div className="metric-list">
-                <MetricRow label="Estado" value={localLatencySli.state} />
-                <MetricRow label="Ultima muestra" value={localLatencySli.lastMs === null ? "--" : `${localLatencySli.lastMs} ms`} />
-                <MetricRow label="Promedio" value={localLatencySli.averageMs === null ? "--" : `${localLatencySli.averageMs} ms`} />
-                <MetricRow label="P95" value={localLatencySli.p95Ms === null ? "--" : `${localLatencySli.p95Ms} ms`} />
-                <MetricRow label="P99" value={localLatencySli.p99Ms === null ? "--" : `${localLatencySli.p99Ms} ms`} />
-                <MetricRow label="Cumplimiento" value={`${localLatencySli.withinSloPercent}%`} />
-                <MetricRow label="SLO" value={`${localLatencyConfig.targetPercent}% <= ${localLatencyConfig.sloMs} ms`} />
-              </div>
-            </Panel>
-
             <Panel title="Observabilidad - operacion" icon={<BarChart3 size={20} />}>
               <div className="metric-list">
                 <MetricRow label="Requests" value={observability?.metrics.requestCount ?? 0} />
@@ -990,6 +1161,17 @@ export function App() {
                 <MetricRow label="Evidencias 24h" value={`${observability?.callStats.recentEvidenceCoveragePercent ?? 0}%`} />
                 <MetricRow label="Grabaciones" value={recordings.length} />
                 <MetricRow label="Provisionador" value={health?.provisioner.ok ? "OK" : "FALLA"} />
+              </div>
+            </Panel>
+
+            <Panel title="Seguridad - voz y datos" icon={<Shield size={20} />}>
+              <div className="metric-list">
+                <MetricRow label="Segmentacion voz" value="SIP/RTP aislado" />
+                <MetricRow label="Estado en tiempo real" value={callCenterHealth?.config.stateStore ?? "Redis"} />
+                <MetricRow label="Transcripciones" value={callCenterHealth?.config.transcriptStore ?? "MongoDB"} />
+                <MetricRow label="PAN tarjetas" value="Enmascarado" />
+                <MetricRow label="Original sensible" value="Cifrado" />
+                <MetricRow label="Grabaciones" value={callCenterHealth?.config.security.recordingEncryptionMode ?? "aes-256-gcm"} />
               </div>
             </Panel>
 
@@ -1179,12 +1361,33 @@ function ProviderIcon({ supplier }: { supplier: DemoSupplier }) {
     return <Cloud className="provider-icon green" size={27} />;
   }
 
+  if (supplier === "dialer") {
+    return <PhoneCall className="provider-icon orange" size={27} />;
+  }
+
+  if (supplier === "transcription") {
+    return <FileAudio className="provider-icon green" size={27} />;
+  }
+
+  if (supplier === "metrics") {
+    return <BarChart3 className="provider-icon dark" size={27} />;
+  }
+
   return <FileText className="provider-icon dark" size={27} />;
 }
 
 function MetricRow({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="metric-row">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function MetricCard({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="metric-card">
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -1255,13 +1458,29 @@ function statusClass(value: string | undefined) {
       "NOT_INUSE",
       "INUSE",
       "INFO",
-      "DISPONIBLE"
+      "DISPONIBLE",
+      "OPORTUNIDAD",
+      "ENMASCARADO"
     ].includes(normalized)
   ) {
     return "good";
   }
 
-  if (["OFF", "CONNECTING", "RINGING", "HALF_OPEN", "NEWCHANNEL", "UNKNOWN", "WARN", "SIN DATOS"].includes(normalized)) {
+  if (
+    [
+      "OFF",
+      "CONNECTING",
+      "RINGING",
+      "HALF_OPEN",
+      "NEWCHANNEL",
+      "UNKNOWN",
+      "WARN",
+      "SIN DATOS",
+      "PENDING",
+      "DIALING",
+      "SIN OPORTUNIDAD"
+    ].includes(normalized)
+  ) {
     return "warn";
   }
 
@@ -1279,6 +1498,7 @@ function statusClass(value: string | undefined) {
       "UNREGISTERED",
       "NO DISPONIBLE",
       "FAILED",
+      "ORIGINATE_FAILED",
       "DEGRADADO",
       "INCUMPLE"
     ].includes(normalized)
@@ -1293,38 +1513,6 @@ function upsertById<T extends { id: number }>(items: T[], item: T): T[] {
   const exists = items.some((current) => current.id === item.id);
   const next = exists ? items.map((current) => (current.id === item.id ? item : current)) : [item, ...items];
   return next.slice(0, 80);
-}
-
-function buildLocalLatencySli(samples: LocalLatencySample[], config: SliConfig["localLatency"]) {
-  const values = samples.map((sample) => sample.roundTripMs);
-  const okCount = samples.filter((sample) => sample.ok).length;
-  const withinSloPercent = samples.length > 0 ? Math.round((okCount / samples.length) * 100) : 0;
-  const p95Ms = percentile(values, 0.95);
-  const p99Ms = percentile(values, 0.99);
-  const averageMs = values.length > 0 ? Math.round(values.reduce((total, value) => total + value, 0) / values.length) : null;
-  const lastMs = samples[0]?.roundTripMs ?? null;
-  const degraded =
-    samples.length > 0 &&
-    ((p95Ms !== null && p95Ms > config.sloMs) || withinSloPercent < config.targetPercent);
-
-  return {
-    lastMs,
-    averageMs,
-    p95Ms,
-    p99Ms,
-    withinSloPercent,
-    state: samples.length === 0 ? "SIN DATOS" : degraded ? "DEGRADADO" : "OK"
-  };
-}
-
-function percentile(values: number[], ratio: number) {
-  if (values.length === 0) {
-    return null;
-  }
-
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.ceil(sorted.length * ratio) - 1;
-  return sorted[Math.min(sorted.length - 1, Math.max(0, index))];
 }
 
 function byExtension(a: Usuario, b: Usuario) {

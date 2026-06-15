@@ -47,6 +47,16 @@ import {
 } from "./observability.js";
 import { sliConfig } from "./sli.js";
 import {
+  analyzeCallText,
+  callCenterConfig,
+  callCenterOverview,
+  checkCallCenter,
+  dialNextLead,
+  listDialerLeads,
+  listTranscripts,
+  setCallCenterCircuitDemo
+} from "./callCenter.js";
+import {
   checkFreepbxProvisioner,
   freepbxProvisionerConfig,
   provisionFreepbxExtension
@@ -86,8 +96,20 @@ const simulateCallSchema = z.object({
   extensionDestino: z.string().regex(/^\d{2,10}$/)
 });
 
+const dialNextSchema = z.object({
+  agentExtension: z.string().regex(/^\d{2,10}$/).optional()
+});
+
+const analyzeTextSchema = z.object({
+  callId: z.string().min(1).max(120),
+  leadName: z.string().max(120).optional().nullable(),
+  agentExtension: z.string().regex(/^\d{2,10}$/).optional().nullable(),
+  recordingFile: z.string().max(240).optional().nullable(),
+  text: z.string().max(5000).optional().nullable()
+});
+
 const demoFailureParamsSchema = z.object({
-  supplier: z.enum(["postgres", "ami", "floci-sqs", "floci-s3"])
+  supplier: z.enum(["postgres", "ami", "floci-sqs", "floci-s3", "dialer", "transcription", "metrics"])
 });
 
 const demoFailureBodySchema = z.object({
@@ -159,13 +181,14 @@ app.get("/api/system", async (_request, response) => {
 });
 
 app.get("/api/observability", async (_request, response) => {
-  const [stats, cdr, audit, recordings] = await Promise.all([
+  const [stats, cdr, audit, recordings, callCenter] = await Promise.all([
     getCallStats(),
     checkCdr(),
     listAuditActions(20),
     listRecentCdrRecordings(20)
       .then((records) => enrichRecordings(records))
-      .catch(() => [])
+      .catch(() => []),
+    checkCallCenter().catch(() => null)
   ]);
 
   response.json({
@@ -173,6 +196,7 @@ app.get("/api/observability", async (_request, response) => {
     sli: sliConfig(),
     callStats: stats,
     cdr,
+    callCenter,
     recording: recordingConfig(),
     recordings,
     audit,
@@ -259,6 +283,80 @@ app.get("/api/extensions/status", async (_request, response, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get("/api/call-center/overview", async (_request, response, next) => {
+  try {
+    response.json(await callCenterOverview());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/call-center/leads", async (_request, response, next) => {
+  try {
+    response.json(await listDialerLeads());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/call-center/dial-next", async (request, response, next) => {
+  try {
+    const input = dialNextSchema.parse(request.body);
+    const result = await dialNextLead(input.agentExtension);
+    void writeAudit(request, {
+      accion: "callcenter.dial.next",
+      entidad: "campaign",
+      entidadId: "default",
+      detalle: { agentExtension: input.agentExtension ?? null, result }
+    });
+    response.status(result?.ok === false ? 202 : 201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/call-center/transcripts", async (_request, response, next) => {
+  try {
+    response.json(await listTranscripts());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/call-center/analyze", async (request, response, next) => {
+  try {
+    const input = analyzeTextSchema.parse(request.body);
+    const result = await analyzeCallText(input);
+    void writeAudit(request, {
+      accion: "callcenter.transcription.analyzed",
+      entidad: "transcript",
+      entidadId: input.callId,
+      detalle: {
+        leadName: input.leadName ?? null,
+        sensitiveMasked: result?.transcript?.sensitiveDataMasked ?? null,
+        opportunity: result?.transcript?.analysis?.opportunity ?? null
+      }
+    });
+    response.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/call-center/security", (_request, response) => {
+  response.json({
+    security: callCenterConfig().security,
+    segmentation: {
+      implemented: "Docker network boundary for lab",
+      productionDesign: "Voice VLAN for SIP/RTP phones, app VLAN for backend/microservices, data VLAN for databases"
+    },
+    pii: {
+      masking: "Credit card PAN masking before storing visible transcript",
+      encryptedOriginal: "Original transcript encrypted in MongoDB"
+    }
+  });
 });
 
 app.post("/api/demo/failures/:supplier", async (request, response, next) => {
@@ -501,22 +599,24 @@ function broadcast(type: string, payload: unknown) {
 }
 
 async function buildSystemStatus() {
-  const [db, floci, ami, cdr, provisioner] = await Promise.all([
+  const [db, floci, ami, cdr, provisioner, callCenter] = await Promise.all([
     checkDatabaseWithCircuit(),
     checkFloci(),
     checkAmi(),
     checkCdr(),
-    checkFreepbxProvisioner()
+    checkFreepbxProvisioner(),
+    checkCallCenter()
   ]);
   const extensions = getExtensionStatuses();
 
   return {
     service: "telefonia-backend",
-    ok: db.ok && floci.ok && ami.ok && provisioner.ok,
+    ok: db.ok && floci.ok && ami.ok && provisioner.ok && callCenter.ok,
     db,
     floci,
     ami,
     cdr,
+    callCenter,
     sli: sliConfig(),
     provisioner,
     recording: recordingConfig(),
@@ -527,14 +627,17 @@ async function buildSystemStatus() {
       supplierSummary("postgres", "PostgreSQL", "Base de datos", db.ok, db.error, db.circuit),
       supplierSummary("ami", "Asterisk AMI", "Eventos PBX", ami.ok, ami.lastError, ami.circuit),
       supplierSummary("floci-sqs", "Floci SQS", "Cola de eventos", floci.sqs.ok, floci.sqs.lastError, floci.sqs.circuit),
-      supplierSummary("floci-s3", "Floci S3", "Evidencias JSON", floci.s3.ok, floci.s3.lastError, floci.s3.circuit)
+      supplierSummary("floci-s3", "Floci S3", "Evidencias JSON", floci.s3.ok, floci.s3.lastError, floci.s3.circuit),
+      ...callCenter.services.map((service) =>
+        supplierSummary(service.supplier, service.label, service.role, service.ok, service.error, service.circuit)
+      )
     ],
     at: new Date().toISOString()
   };
 }
 
 async function buildDemoReport() {
-  const [system, callStats, recentCalls, extensions, recentCdr, recordings, audit] = await Promise.all([
+  const [system, callStats, recentCalls, extensions, recentCdr, recordings, audit, callCenter] = await Promise.all([
     buildSystemStatus(),
     getCallStats(),
     listLlamadas(20),
@@ -543,20 +646,22 @@ async function buildDemoReport() {
     listRecentCdrRecordings(30)
       .then((records) => enrichRecordings(records))
       .catch(() => []),
-    listAuditActions(100)
+    listAuditActions(100),
+    callCenterOverview().catch(() => null)
   ]);
   const reconciliation = await reconcileCallsWithCdr(recentCalls);
 
   return {
     generatedAt: new Date().toISOString(),
     objective:
-      "Red telefonica interna con FreePBX/Asterisk, softphones, AMI, PostgreSQL, Floci SQS/S3 y circuit breaker.",
+      "Operaciones de ventas call center con FreePBX/Asterisk, marcador Python, transcripcion, analisis de calidad, Redis, MongoDB, Floci SQS/S3 y circuit breaker.",
     system,
     callStats,
     extensions,
     recentCalls,
     recentCdr,
     recordings,
+    callCenter,
     reconciliation,
     observability: {
       metrics: metricsSnapshot(),
@@ -570,7 +675,7 @@ async function buildDemoReport() {
     reliability: {
       sli: system.sli,
       note:
-        "El SLI de latencia local se mide desde el navegador del dashboard hacia /api/sli/ping; el backend publica el SLO y el dashboard calcula cumplimiento con muestras recientes."
+        "El backend conserva una medicion SLI/SLO de latencia local para confiabilidad interna. El dashboard principal se centra en operacion de llamadas, proveedores y calidad."
     },
     evidence: {
       bucket: system.floci.bucketName,
@@ -587,9 +692,10 @@ async function buildDemoReport() {
         : "Credenciales personalizadas configuradas."
     },
     recommendations: [
-      "Hacer una llamada real 1001 -> 1002, contestar y cortar durante la presentacion.",
+      "Registrar softphones 1001 y 1002 antes de probar marcacion real.",
+      "Usar Marcar lead para demostrar AMI Originate y Analizar texto demo para MongoDB/enmascaramiento.",
       "Mostrar /api/demo/report o scripts/demo-report.sh como evidencia final.",
-      "Mantener FreePBX, backend, PostgreSQL, Floci y frontend activos antes de iniciar la demo."
+      "Mantener FreePBX, backend, PostgreSQL, Redis, MongoDB, Floci, microservicios y frontend activos antes de iniciar la demo."
     ]
   };
 }
@@ -662,6 +768,11 @@ function setSupplierCircuitState(supplier: DemoSupplier, open: boolean) {
 
   if (supplier === "ami") {
     setAmiCircuitDemo(open);
+    return;
+  }
+
+  if (["dialer", "transcription", "metrics"].includes(supplier)) {
+    setCallCenterCircuitDemo(supplier, open);
     return;
   }
 

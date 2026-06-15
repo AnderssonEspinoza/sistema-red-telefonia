@@ -10,10 +10,10 @@ api_init
 SUPPLIER="${1:-floci-sqs}"
 
 case "$SUPPLIER" in
-  postgres|ami|floci-sqs|floci-s3) ;;
+  postgres|ami|floci-sqs|floci-s3|dialer|transcription|metrics) ;;
   *)
     echo "Proveedor invalido: $SUPPLIER" >&2
-    echo "Uso: $0 [postgres|ami|floci-sqs|floci-s3]" >&2
+    echo "Uso: $0 [postgres|ami|floci-sqs|floci-s3|dialer|transcription|metrics]" >&2
     exit 1
     ;;
 esac
@@ -37,28 +37,6 @@ print_supplier() {
   fi
 }
 
-print_call() {
-  if command -v jq >/dev/null 2>&1; then
-    jq '{id, estado, fuente, evidencia_key}'
-  elif command -v node >/dev/null 2>&1; then
-    node -e '
-      let input = "";
-      process.stdin.on("data", (chunk) => input += chunk);
-      process.stdin.on("end", () => {
-        const data = JSON.parse(input);
-        console.log(JSON.stringify({
-          id: data.id,
-          estado: data.estado,
-          fuente: data.fuente,
-          evidencia_key: data.evidencia_key
-        }, null, 2));
-      });
-    '
-  else
-    cat
-  fi
-}
-
 echo "Estado inicial"
 api_request GET "/api/health" | print_supplier
 
@@ -67,8 +45,8 @@ echo "Activando falla controlada para ${SUPPLIER}"
 api_request POST "/api/demo/failures/${SUPPLIER}" '{"enabled":true}' | print_supplier
 
 echo
-echo "Generando una llamada simulada durante la falla"
-api_request POST "/api/simulate-call" '{"extensionOrigen":"1001","extensionDestino":"1002"}' | print_call
+echo "Verificando que el dashboard/API siguen respondiendo durante la falla"
+api_request GET "/api/health" | print_supplier
 
 echo
 echo "Recuperando ${SUPPLIER}"

@@ -23,6 +23,9 @@ console.log(`Llamadas: ${report.callStats.total}`);
 console.log(`Evidencias total: ${report.evidence.callsWithEvidence} (${report.evidence.coveragePercent}%)`);
 console.log(`Evidencias 24h: ${report.callStats.recentWithEvidence}/${report.callStats.recentTotal} (${report.callStats.recentEvidenceCoveragePercent}%)`);
 console.log(`CDR recientes: ${report.recentCdr.length}`);
+if (report.callCenter?.metrics) {
+  console.log(`Call center: ${report.callCenter.metrics.callsTotal} marcaciones, ${report.callCenter.metrics.salesOpportunities} oportunidades, ${report.callCenter.metrics.sensitiveMasked} enmascaradas`);
+}
 console.log('Proveedores:');
 for (const supplier of report.system.suppliers) {
   console.log(`- ${supplier.label}: ${supplier.ok ? 'OK' : 'FALLA'} / ${supplier.circuit.state}`);
