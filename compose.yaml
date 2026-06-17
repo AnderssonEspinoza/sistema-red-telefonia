@@ -44,6 +44,14 @@ services:
     volumes:
       - mongo_data:/data/db
 
+  host-network-agent:
+    build:
+      context: ./services/host-network-agent
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      HOST_NETWORK_AGENT_PORT: ${HOST_NETWORK_AGENT_PORT:-7040}
+
   dialer-service:
     build:
       context: ./services/dialer
@@ -96,12 +104,17 @@ services:
     environment:
       PORT: ${BACKEND_PORT}
       NODE_ENV: production
+      HOST_NETWORK_AGENT_URL: http://host.docker.internal:${HOST_NETWORK_AGENT_PORT:-7040}
     ports:
       - "${BACKEND_PORT}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
       floci:
+        condition: service_started
+      host-network-agent:
         condition: service_started
       dialer-service:
         condition: service_started

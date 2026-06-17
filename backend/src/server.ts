@@ -67,6 +67,7 @@ import { enrichRecordings, recordingConfig, resolveRecordingFile } from "./recor
 
 const port = Number(process.env.PORT ?? 3000);
 const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
+const hostNetworkAgentUrl = process.env.HOST_NETWORK_AGENT_URL ?? "http://host.docker.internal:7040";
 const dbCircuit = new CircuitBreaker("postgres", 2, 15000);
 
 const app = express();
@@ -201,20 +202,22 @@ app.get("/api/telephony/network/detect", async (request, response, next) => {
     const requestHost = host.split(":")[0];
     const provisioner = await checkFreepbxProvisioner();
     const configuredIp = "network" in provisioner ? provisioner.network?.externip ?? null : null;
-    const detectedIp = isUsableLanIp(requestHost) ? requestHost : configuredIp;
+    const hostDetection = await detectHostNetwork().catch(() => null);
+    const detectedIp = hostDetection?.lanIp ?? (isUsableLanIp(requestHost) ? requestHost : configuredIp);
 
     if (!detectedIp) {
       response.status(404).json({ error: "No se pudo detectar una IP LAN utilizable" });
       return;
     }
 
-    const lanCidr = suggestCidr(detectedIp);
+    const lanCidr = hostDetection?.lanCidr ?? suggestCidr(detectedIp);
 
     response.json({
       lanIp: detectedIp,
       lanCidr,
-      lanNet: networkAddress(detectedIp, lanCidr),
-      source: isUsableLanIp(requestHost) ? "request-host" : "freepbx-config",
+      lanNet: hostDetection?.lanNet ?? networkAddress(detectedIp, lanCidr),
+      source: hostDetection?.source ?? (isUsableLanIp(requestHost) ? "request-host" : "freepbx-config"),
+      interface: hostDetection?.interface ?? null,
       current: configuredIp,
       requestHost: requestHost || null
     });
@@ -830,6 +833,33 @@ function suggestCidr(ip: string) {
   }
 
   return 24;
+}
+
+async function detectHostNetwork() {
+  const response = await fetch(`${hostNetworkAgentUrl.replace(/\/$/, "")}/detect`, { signal: AbortSignal.timeout(2500) });
+  const body = (await response.json().catch(() => null)) as {
+    ok?: boolean;
+    lanIp?: string;
+    lanCidr?: number;
+    lanNet?: string;
+    interface?: string | null;
+    source?: string;
+  } | null;
+
+  if (!response.ok || body?.ok !== true || !isUsableLanIp(body.lanIp)) {
+    return null;
+  }
+
+  const lanIp = String(body.lanIp);
+  const lanCidr = Number(body.lanCidr ?? suggestCidr(lanIp));
+
+  return {
+    lanIp,
+    lanCidr,
+    lanNet: body.lanNet ?? networkAddress(lanIp, lanCidr),
+    interface: body.interface ?? null,
+    source: body.source ?? "host-network-agent"
+  };
 }
 
 function networkAddress(ip: string, cidr: number) {
