@@ -6,6 +6,8 @@ node_modules/
 dist/
 .vite/
 coverage/
+__pycache__/
+*.pyc
 
 backups/
 reports/
