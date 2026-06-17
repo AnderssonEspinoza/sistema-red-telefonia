@@ -59,6 +59,7 @@ import {
 } from "./callCenter.js";
 import {
   checkFreepbxProvisioner,
+  configureFreepbxNetwork,
   freepbxProvisionerConfig,
   provisionFreepbxExtension
 } from "./freepbxProvisioner.js";
@@ -96,6 +97,13 @@ const usuarioUpdateSchema = z.object({
   nombre: z.string().min(2).max(100),
   procedencia: z.string().max(100).optional().nullable(),
   area: z.string().max(100).optional().nullable()
+});
+
+const telephonyNetworkSchema = z.object({
+  lanIp: z
+    .string()
+    .regex(/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/),
+  lanCidr: z.number().int().min(8).max(30).default(16)
 });
 
 const simulateCallSchema = z.object({
@@ -471,6 +479,29 @@ app.patch("/api/users/:extension", async (request, response, next) => {
     });
     broadcast("USER_UPDATED", usuario);
     response.json(usuario);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telephony/network", async (request, response, next) => {
+  try {
+    const input = telephonyNetworkSchema.parse(request.body);
+    const result = await configureFreepbxNetwork(input);
+
+    void writeAudit(request, {
+      accion: "telephony.network.updated",
+      entidad: "freepbx",
+      entidadId: "sip-rtp-network",
+      detalle: { ...result }
+    });
+    recordOperationalEvent("INFO", "telephony.network.updated", "Red SIP/RTP actualizada", {
+      lanIp: result.lanIp,
+      lanNet: result.lanNet,
+      lanCidr: result.lanCidr
+    });
+
+    response.json(result);
   } catch (error) {
     next(error);
   }

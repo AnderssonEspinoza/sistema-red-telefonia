@@ -243,6 +243,12 @@ interface Health {
     ok: boolean;
     error: string | null;
     version: string | null;
+    network?: {
+      externip?: string | null;
+      localnets?: unknown;
+      rtpstart?: string | number | null;
+      rtpend?: string | number | null;
+    } | null;
   };
   recording: {
     enabled: boolean;
@@ -339,6 +345,11 @@ interface UsuarioForm {
   recordCalls: boolean;
 }
 
+interface NetworkForm {
+  lanIp: string;
+  lanCidr: string;
+}
+
 interface LoginForm {
   username: string;
   password: string;
@@ -352,6 +363,10 @@ const emptyForm: UsuarioForm = {
   sipSecret: "",
   provisionFreepbx: true,
   recordCalls: true
+};
+const emptyNetworkForm: NetworkForm = {
+  lanIp: "",
+  lanCidr: "16"
 };
 const activeCallMaxAgeMs = 8 * 60 * 60 * 1000;
 const tokenStorageKey = "telefonia_auth_token";
@@ -373,6 +388,10 @@ export function App() {
   const [formNotice, setFormNotice] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [editingExtension, setEditingExtension] = useState<string | null>(null);
+  const [networkForm, setNetworkForm] = useState<NetworkForm>(emptyNetworkForm);
+  const [networkNotice, setNetworkNotice] = useState<string | null>(null);
+  const [networkError, setNetworkError] = useState<string | null>(null);
+  const [applyingNetwork, setApplyingNetwork] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dialingLead, setDialingLead] = useState(false);
   const [analyzingText, setAnalyzingText] = useState(false);
@@ -525,6 +544,14 @@ export function App() {
     setPage((current) => Math.min(current, totalPages));
   }, [totalPages]);
 
+  useEffect(() => {
+    const externip = health?.provisioner.network?.externip;
+
+    if (externip && !networkForm.lanIp) {
+      setNetworkForm((current) => ({ ...current, lanIp: externip }));
+    }
+  }, [health?.provisioner.network?.externip, networkForm.lanIp]);
+
   async function submitUser(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
@@ -609,6 +636,36 @@ export function App() {
     setForm(emptyForm);
     setFormNotice(null);
     setFormError(null);
+  }
+
+  async function applyTelephonyNetwork(event: FormEvent) {
+    event.preventDefault();
+    setApplyingNetwork(true);
+    setNetworkNotice(null);
+    setNetworkError(null);
+
+    try {
+      const response = await apiFetch("/api/telephony/network", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lanIp: networkForm.lanIp,
+          lanCidr: Number(networkForm.lanCidr)
+        })
+      });
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(body?.error ?? "No se pudo aplicar la red");
+      }
+
+      setNetworkNotice(`Red aplicada: ${body.lanIp} / ${body.lanNet}/${body.lanCidr}`);
+      await loadData();
+    } catch (error) {
+      setNetworkError(error instanceof Error ? error.message : "No se pudo aplicar la red");
+    } finally {
+      setApplyingNetwork(false);
+    }
   }
 
   async function simulateCall() {
@@ -839,6 +896,7 @@ export function App() {
   const transcripts = callCenter?.transcripts.transcripts ?? [];
   const callCenterHealth = callCenter?.health ?? health?.callCenter ?? observability?.callCenter ?? null;
   const callCenterState = callCenterHealth ? (callCenterHealth.ok ? "OK" : "FALLA") : undefined;
+  const networkPreview = previewNetwork(networkForm.lanIp, Number(networkForm.lanCidr));
 
   const statusCards = [
     {
@@ -931,6 +989,7 @@ export function App() {
           <SidebarItem active={activeNav === "extensiones"} icon={<SlidersHorizontal size={20} />} label="Extensiones" onClick={() => navigateToSection("extensiones")} />
           <SidebarItem active={activeNav === "proveedores"} icon={<Settings size={20} />} label="Proveedores" onClick={() => navigateToSection("proveedores")} />
           <SidebarItem active={activeNav === "usuarios"} icon={<Users size={20} />} label="Usuarios" onClick={() => navigateToSection("usuarios")} />
+          <SidebarItem active={activeNav === "configuracion"} icon={<RadioTower size={20} />} label="Red SIP/RTP" onClick={() => navigateToSection("configuracion")} />
           <SidebarItem active={activeNav === "grabaciones"} icon={<FileAudio size={20} />} label="Grabaciones" onClick={() => navigateToSection("grabaciones")} />
           <SidebarItem active={activeNav === "auditoria"} icon={<Shield size={20} />} label="Auditoria" onClick={() => navigateToSection("auditoria")} />
           <SidebarItem icon={<FileText size={20} />} label="Reporte" onClick={() => void downloadReport()} />
@@ -1240,6 +1299,45 @@ export function App() {
                 <MetricRow label="Original sensible" value="Cifrado" />
                 <MetricRow label="Grabaciones" value={callCenterHealth?.config.security.recordingEncryptionMode ?? "aes-256-gcm"} />
               </div>
+            </Panel>
+
+            <Panel id="configuracion" title="Red SIP/RTP" icon={<RadioTower size={20} />}>
+              <form className="user-form" onSubmit={(event) => void applyTelephonyNetwork(event)}>
+                <label>
+                  IP del servidor
+                  <input
+                    required
+                    inputMode="decimal"
+                    pattern="(?:[0-9]{1,3}\.){3}[0-9]{1,3}"
+                    placeholder="Ej. 10.252.209.137"
+                    value={networkForm.lanIp}
+                    onChange={(event) => setNetworkForm((current) => ({ ...current, lanIp: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  CIDR de red
+                  <input
+                    required
+                    inputMode="numeric"
+                    min="8"
+                    max="30"
+                    type="number"
+                    value={networkForm.lanCidr}
+                    onChange={(event) => setNetworkForm((current) => ({ ...current, lanCidr: event.target.value }))}
+                  />
+                </label>
+                <div className="network-summary">
+                  <MetricRow label="Red local" value={networkPreview ?? "Completar IP"} />
+                  <MetricRow label="SIP" value={`${networkForm.lanIp || "IP"}:5060/UDP`} />
+                  <MetricRow label="RTP" value="10000-10100/UDP" />
+                </div>
+                {networkNotice && <p className="form-success">{networkNotice}</p>}
+                {networkError && <p className="form-error">{networkError}</p>}
+                <button className="primary-button full" type="submit" disabled={applyingNetwork}>
+                  <RadioTower size={18} />
+                  {applyingNetwork ? "Aplicando" : "Aplicar red"}
+                </button>
+              </form>
             </Panel>
 
             <Panel id="grabaciones" title="Grabaciones - CDR" icon={<FileAudio size={20} />}>
@@ -1599,6 +1697,21 @@ function upsertById<T extends { id: number }>(items: T[], item: T): T[] {
 
 function byExtension(a: Usuario, b: Usuario) {
   return a.extension.localeCompare(b.extension);
+}
+
+function previewNetwork(ip: string, cidr: number) {
+  const parts = ip.split(".").map((part) => Number(part));
+
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255) || cidr < 8 || cidr > 30) {
+    return null;
+  }
+
+  const mask = (0xffffffff << (32 - cidr)) >>> 0;
+  const address = parts.reduce((acc, part) => ((acc << 8) + part) >>> 0, 0);
+  const network = (address & mask) >>> 0;
+  const networkIp = [24, 16, 8, 0].map((shift) => (network >>> shift) & 255).join(".");
+
+  return `${networkIp}/${cidr}`;
 }
 
 function formatTime(value: string | null | undefined) {

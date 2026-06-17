@@ -20,6 +20,30 @@ export interface FreepbxProvisionResult {
   message: string;
 }
 
+export interface FreepbxNetworkInput {
+  lanIp: string;
+  lanCidr: number;
+}
+
+export interface FreepbxNetworkResult {
+  enabled: boolean;
+  ok: boolean;
+  lanIp: string;
+  lanNet: string;
+  lanCidr: number;
+  rtpStart: number;
+  rtpEnd: number;
+  reload: boolean;
+  message: string;
+}
+
+export interface FreepbxProvisionerNetworkStatus {
+  externip?: string | null;
+  localnets?: unknown;
+  rtpstart?: string | number | null;
+  rtpend?: string | number | null;
+}
+
 export function freepbxProvisionerConfig() {
   return {
     enabled,
@@ -37,20 +61,26 @@ export async function checkFreepbxProvisioner() {
     const response = await fetch(provisionerUrl, {
       headers: authorizationHeaders()
     });
-    const body = (await response.json().catch(() => null)) as { ok?: boolean; version?: string } | null;
+    const body = (await response.json().catch(() => null)) as {
+      ok?: boolean;
+      version?: string;
+      network?: FreepbxProvisionerNetworkStatus | null;
+    } | null;
 
     return {
       ...freepbxProvisionerConfig(),
       ok: response.ok && body?.ok === true,
       error: response.ok ? null : `FreePBX provisioner HTTP ${response.status}`,
-      version: body?.version ?? null
+      version: body?.version ?? null,
+      network: body?.network ?? null
     };
   } catch (error) {
     return {
       ...freepbxProvisionerConfig(),
       ok: false,
       error: error instanceof Error ? error.message : String(error),
-      version: null
+      version: null,
+      network: null
     };
   }
 }
@@ -93,6 +123,64 @@ export async function provisionFreepbxExtension(input: FreepbxProvisionInput): P
     reload: Boolean(body.reload),
     message: String(body.message ?? "Extension provisionada")
   };
+}
+
+export async function configureFreepbxNetwork(input: FreepbxNetworkInput): Promise<FreepbxNetworkResult> {
+  const lanNet = networkAddress(input.lanIp, input.lanCidr);
+
+  if (!enabled) {
+    return {
+      enabled,
+      ok: true,
+      lanIp: input.lanIp,
+      lanNet,
+      lanCidr: input.lanCidr,
+      rtpStart: 10000,
+      rtpEnd: 10100,
+      reload: false,
+      message: "Provisionamiento FreePBX deshabilitado"
+    };
+  }
+
+  const response = await fetch(provisionerUrl, {
+    method: "POST",
+    headers: {
+      ...authorizationHeaders(),
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      action: "configure-network",
+      lanIp: input.lanIp,
+      lanNet,
+      lanCidr: input.lanCidr
+    })
+  });
+  const body = (await response.json().catch(() => null)) as Partial<FreepbxNetworkResult> & { error?: string } | null;
+
+  if (!response.ok || body?.ok !== true) {
+    throw new Error(body?.error ?? `FreePBX provisioner HTTP ${response.status}`);
+  }
+
+  return {
+    enabled,
+    ok: true,
+    lanIp: String(body.lanIp ?? input.lanIp),
+    lanNet: String(body.lanNet ?? lanNet),
+    lanCidr: Number(body.lanCidr ?? input.lanCidr),
+    rtpStart: Number(body.rtpStart ?? 10000),
+    rtpEnd: Number(body.rtpEnd ?? 10100),
+    reload: Boolean(body.reload),
+    message: String(body.message ?? "Red SIP/RTP actualizada")
+  };
+}
+
+function networkAddress(ip: string, cidr: number) {
+  const parts = ip.split(".").map((part) => Number(part));
+  const mask = cidr === 0 ? 0 : (0xffffffff << (32 - cidr)) >>> 0;
+  const address = parts.reduce((acc, part) => ((acc << 8) + part) >>> 0, 0);
+  const network = (address & mask) >>> 0;
+
+  return [24, 16, 8, 0].map((shift) => (network >>> shift) & 255).join(".");
 }
 
 function authorizationHeaders() {

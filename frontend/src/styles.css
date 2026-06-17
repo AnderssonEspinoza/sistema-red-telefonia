@@ -810,6 +810,13 @@ td {
   cursor: not-allowed;
 }
 
+.network-summary {
+  display: grid;
+  border: 1px solid #e6e1db;
+  border-radius: 7px;
+  overflow: hidden;
+}
+
 .metric-row {
   display: flex;
   align-items: center;

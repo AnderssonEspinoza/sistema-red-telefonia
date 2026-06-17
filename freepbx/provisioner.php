@@ -28,7 +28,7 @@ function runHttpEndpoint(): void
     }
 
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-        jsonResponse(['ok' => true, 'service' => 'freepbx-provisioner', 'version' => '1.1']);
+        jsonResponse(provisionerStatus());
         return;
     }
 
@@ -44,7 +44,8 @@ function runHttpEndpoint(): void
         return;
     }
 
-    $validated = validatePayload($payload);
+    $action = (string)($payload['action'] ?? 'provision-extension');
+    $validated = $action === 'configure-network' ? validateNetworkPayload($payload) : validatePayload($payload);
 
     if (isset($validated['error'])) {
         jsonResponse(['ok' => false, 'error' => $validated['error']], 400);
@@ -89,6 +90,11 @@ function runCliWorker(array $argv): void
 
     try {
         include '/etc/freepbx.conf';
+
+        if (($payload['action'] ?? '') === 'configure-network') {
+            configureNetwork($payload);
+            return;
+        }
 
         $core = FreePBX::Core();
         $extension = (string)$payload['extension'];
@@ -160,6 +166,103 @@ function runCliWorker(array $argv): void
     }
 }
 
+function provisionerStatus(): array
+{
+    $transport = parseKeyValueFile('/etc/asterisk/pjsip.transports.conf');
+    $rtp = parseKeyValueFile('/etc/asterisk/rtp_additional.conf');
+    $localNet = $transport['local_net'] ?? null;
+
+    return [
+        'ok' => true,
+        'service' => 'freepbx-provisioner',
+        'version' => '1.2',
+        'network' => [
+            'externip' => $transport['external_media_address'] ?? $transport['external_signaling_address'] ?? null,
+            'localnets' => $localNet ? [$localNet] : [],
+            'rtpstart' => $rtp['rtpstart'] ?? null,
+            'rtpend' => $rtp['rtpend'] ?? null,
+        ],
+    ];
+}
+
+function parseKeyValueFile(string $path): array
+{
+    $values = [];
+    $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+
+    foreach ($lines as $line) {
+        $line = trim($line);
+
+        if ($line === '' || str_starts_with($line, ';') || !str_contains($line, '=')) {
+            continue;
+        }
+
+        [$key, $value] = array_map('trim', explode('=', $line, 2));
+        $values[$key] = $value;
+    }
+
+    return $values;
+}
+
+function validateNetworkPayload(array $payload): array
+{
+    $lanIp = trim((string)($payload['lanIp'] ?? ''));
+    $lanNet = trim((string)($payload['lanNet'] ?? ''));
+    $lanCidr = (int)($payload['lanCidr'] ?? 0);
+
+    if (!filter_var($lanIp, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        return ['error' => 'IP LAN invalida'];
+    }
+
+    if (!filter_var($lanNet, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        return ['error' => 'Red LAN invalida'];
+    }
+
+    if ($lanCidr < 8 || $lanCidr > 30) {
+        return ['error' => 'CIDR invalido'];
+    }
+
+    return [
+        'action' => 'configure-network',
+        'lanIp' => $lanIp,
+        'lanNet' => $lanNet,
+        'lanCidr' => $lanCidr,
+    ];
+}
+
+function configureNetwork(array $payload): void
+{
+    $lanIp = (string)$payload['lanIp'];
+    $lanNet = (string)$payload['lanNet'];
+    $lanCidr = (string)$payload['lanCidr'];
+
+    $sipsettings = FreePBX::Sipsettings();
+    $sipsettings->setConfig('externip', $lanIp);
+    $sipsettings->setConfig('localnets', [
+        ['net' => $lanNet, 'mask' => $lanCidr],
+    ]);
+    $sipsettings->setConfig('rtpstart', '10000');
+    $sipsettings->setConfig('rtpend', '10100');
+
+    applyNatAudioSettingsForAllExtensions();
+
+    $reloadOutput = [];
+    $reloadCode = 0;
+    exec('fwconsole reload 2>&1', $reloadOutput, $reloadCode);
+
+    echo json_encode([
+        'ok' => true,
+        'lanIp' => $lanIp,
+        'lanNet' => $lanNet,
+        'lanCidr' => (int)$lanCidr,
+        'rtpStart' => 10000,
+        'rtpEnd' => 10100,
+        'reload' => $reloadCode === 0,
+        'reloadOutput' => implode("\n", $reloadOutput),
+        'message' => 'Red SIP/RTP actualizada en FreePBX',
+    ], JSON_UNESCAPED_SLASHES);
+}
+
 function validatePayload(array $payload): array
 {
     $extension = trim((string)($payload['extension'] ?? ''));
@@ -202,6 +305,23 @@ function applyNatAudioSettings(string $extension): void
     foreach ($settings as $keyword => $value) {
         $stmt = $db->prepare('UPDATE sip SET data = ? WHERE id = ? AND keyword = ?');
         $stmt->execute([$value, $extension, $keyword]);
+    }
+}
+
+function applyNatAudioSettingsForAllExtensions(): void
+{
+    $db = FreePBX::Database();
+    $settings = [
+        'direct_media' => 'no',
+        'rtp_symmetric' => 'yes',
+        'force_rport' => 'yes',
+        'rewrite_contact' => 'yes',
+        'media_encryption' => 'no',
+    ];
+
+    foreach ($settings as $keyword => $value) {
+        $stmt = $db->prepare('UPDATE sip SET data = ? WHERE keyword = ?');
+        $stmt->execute([$value, $keyword]);
     }
 }
 
