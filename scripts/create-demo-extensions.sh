@@ -64,6 +64,19 @@ function applyRecordingSettings(string $extension): void
         $astman->database_put('AMPUSER', $extension . '/' . $key, $value);
     }
 }
+
+$settings = [
+    'direct_media' => 'no',
+    'rtp_symmetric' => 'yes',
+    'force_rport' => 'yes',
+    'rewrite_contact' => 'yes',
+    'media_encryption' => 'no',
+];
+$db = FreePBX::Database();
+foreach ($settings as $keyword => $value) {
+    $stmt = $db->prepare("UPDATE sip SET data = ? WHERE keyword = ? AND id IN ('1001', '1002')");
+    $stmt->execute([$value, $keyword]);
+}
 PHP
 
 docker compose exec -T freepbx fwconsole reload

@@ -138,6 +138,7 @@ function runCliWorker(array $argv): void
             $created = true;
         }
 
+        applyNatAudioSettings($extension);
         applyRecordingSettings($extension, (bool)$payload['recording']);
 
         $reloadOutput = [];
@@ -185,6 +186,23 @@ function validatePayload(array $payload): array
         'secret' => $secret,
         'recording' => $recording,
     ];
+}
+
+function applyNatAudioSettings(string $extension): void
+{
+    $db = FreePBX::Database();
+    $settings = [
+        'direct_media' => 'no',
+        'rtp_symmetric' => 'yes',
+        'force_rport' => 'yes',
+        'rewrite_contact' => 'yes',
+        'media_encryption' => 'no',
+    ];
+
+    foreach ($settings as $keyword => $value) {
+        $stmt = $db->prepare('UPDATE sip SET data = ? WHERE id = ? AND keyword = ?');
+        $stmt->execute([$value, $extension, $keyword]);
+    }
 }
 
 function applyRecordingSettings(string $extension, bool $enabled): void

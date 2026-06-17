@@ -173,6 +173,7 @@ interface CallCenterOverview {
   metrics: CallCenterMetrics | null;
   leads: {
     pending: number;
+    nextLead: CallCenterLead | null;
     leads: CallCenterLead[];
   };
   transcripts: {
@@ -781,6 +782,7 @@ export function App() {
 
   const callCenterMetrics = callCenter?.metrics;
   const leads = callCenter?.leads.leads ?? [];
+  const nextLead = callCenter?.leads.nextLead ?? null;
   const transcripts = callCenter?.transcripts.transcripts ?? [];
   const callCenterHealth = callCenter?.health ?? health?.callCenter ?? observability?.callCenter ?? null;
   const callCenterState = callCenterHealth ? (callCenterHealth.ok ? "OK" : "FALLA") : undefined;
@@ -979,6 +981,10 @@ export function App() {
                   <MetricCard label="Datos enmascarados" value={callCenterMetrics?.sensitiveMasked ?? 0} />
                 </div>
                 <div className="callcenter-actions">
+                  <div className="next-lead-box">
+                    <span>Siguiente lead</span>
+                    <strong>{nextLead ? `${nextLead.name} (${nextLead.phone})` : "Sin leads pendientes"}</strong>
+                  </div>
                   <button className="primary-button full" type="button" disabled={dialingLead} onClick={() => void dialNextLeadAction()}>
                     <Play size={18} />
                     {dialingLead ? "Marcando" : "Marcar siguiente lead"}

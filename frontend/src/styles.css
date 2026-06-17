@@ -621,6 +621,30 @@ code {
   align-content: start;
 }
 
+.next-lead-box {
+  display: grid;
+  gap: 5px;
+  min-height: 58px;
+  align-content: center;
+  border: 1px solid #e3ded7;
+  border-radius: 7px;
+  background: #fbfaf8;
+  padding: 10px 12px;
+}
+
+.next-lead-box span {
+  color: #69717a;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.next-lead-box strong {
+  color: #25303b;
+  font-size: 14px;
+  font-weight: 950;
+  overflow-wrap: anywhere;
+}
+
 .callcenter-message {
   padding: 0 16px 16px;
 }

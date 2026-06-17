@@ -54,8 +54,10 @@ def health() -> dict[str, Any]:
 @app.get("/leads")
 def list_leads() -> dict[str, Any]:
     leads = [load_lead(key.split(":", 1)[1]) for key in sorted(redis_client.keys("lead:*"))]
+    next_lead = next_pending_lead()
     return {
         "pending": redis_client.zcard("campaign:default:pending"),
+        "nextLead": next_lead,
         "leads": [lead for lead in leads if lead is not None],
     }
 
@@ -105,6 +107,8 @@ def dial_next(request: DialRequest) -> dict[str, Any]:
     if not originate_result["ok"]:
         redis_client.hset(f"call:{call_id}", mapping={"status": "ORIGINATE_FAILED", "updatedAt": utcnow()})
         redis_client.srem("calls:active", call_id)
+        redis_client.hset(f"lead:{lead_id}", mapping={"status": "PENDING", "updatedAt": utcnow()})
+        redis_client.zadd(f"campaign:{request.campaignId}:pending", {lead_id: int(lead.get("priority", 50))})
 
     return {
         "ok": originate_result["ok"],
@@ -150,6 +154,25 @@ def seed_leads() -> None:
     redis_client.set("campaign:default:seeded", "true")
 
 
+@app.post("/campaigns/{campaign_id}/reset")
+def reset_campaign(campaign_id: str = "default") -> dict[str, Any]:
+    redis_client.delete(f"campaign:{campaign_id}:pending")
+    redis_client.delete("calls:active")
+
+    for key in redis_client.keys("call:*"):
+        redis_client.delete(key)
+
+    for key in redis_client.keys("lead:*"):
+        lead_id = key.split(":", 1)[1]
+        lead = load_lead(lead_id)
+        if not lead:
+            continue
+        redis_client.hset(key, mapping={"status": "PENDING", "updatedAt": utcnow()})
+        redis_client.zadd(f"campaign:{campaign_id}:pending", {lead_id: int(lead.get("priority", 50))})
+
+    return list_leads()
+
+
 def save_lead(lead: Lead) -> None:
     redis_client.hset(
         f"lead:{lead.id}",
@@ -164,6 +187,13 @@ def save_lead(lead: Lead) -> None:
 def load_lead(lead_id: str) -> dict[str, str] | None:
     data = redis_client.hgetall(f"lead:{lead_id}")
     return data or None
+
+
+def next_pending_lead() -> dict[str, str] | None:
+    next_items = redis_client.zrevrange("campaign:default:pending", 0, 0)
+    if not next_items:
+        return None
+    return load_lead(next_items[0])
 
 
 def active_call_count() -> int:

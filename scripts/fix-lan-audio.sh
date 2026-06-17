@@ -18,9 +18,29 @@ fi
 
 docker compose up -d freepbx
 
-until docker compose exec -T freepbx asterisk -rx 'core show version' >/dev/null 2>&1; do
-  sleep 3
-done
+wait_for_asterisk() {
+  until docker compose exec -T freepbx asterisk -rx 'core show version' >/dev/null 2>&1; do
+    sleep 3
+  done
+}
+
+reload_freepbx() {
+  local attempts=20
+  local delay=3
+
+  for ((i = 1; i <= attempts; i++)); do
+    docker compose exec -T freepbx asterisk -rx 'module reload manager' >/dev/null 2>&1 || true
+    if docker compose exec -T freepbx fwconsole reload; then
+      return 0
+    fi
+    sleep "$delay"
+  done
+
+  echo "No se pudo recargar FreePBX despues de varios intentos." >&2
+  return 1
+}
+
+wait_for_asterisk
 
 docker compose exec -T \
   -e LAN_IP="$LAN_IP" \
@@ -43,25 +63,31 @@ $sipsettings->setConfig('rtpstart', '10000');
 $sipsettings->setConfig('rtpend', '10100');
 
 $db = FreePBX::Database();
-$stmt = $db->prepare("UPDATE sip SET data = 'no' WHERE keyword = 'direct_media' AND id IN ('1001', '1002')");
-$stmt->execute();
+$settings = [
+    'direct_media' => 'no',
+    'rtp_symmetric' => 'yes',
+    'force_rport' => 'yes',
+    'rewrite_contact' => 'yes',
+    'media_encryption' => 'no',
+];
+
+foreach ($settings as $keyword => $value) {
+    $stmt = $db->prepare("UPDATE sip SET data = ? WHERE keyword = ?");
+    $stmt->execute([$value, $keyword]);
+}
 
 echo "SIP external address: {$lanIp}\n";
 echo "SIP local network: {$lanNet}/{$lanCidr}\n";
 echo "RTP range: 10000-10100\n";
-echo "Direct media: disabled for 1001 and 1002\n";
+echo "NAT/audio settings: direct media disabled, symmetric RTP enabled\n";
 PHP
 
-docker compose exec -T freepbx fwconsole reload
+reload_freepbx
 docker compose stop freepbx
 docker compose run --rm --no-deps --entrypoint sh freepbx -c 'rm -f /var/run/apache2/apache2.pid /run/apache2/apache2.pid /var/run/httpd/httpd.pid /run/httpd/httpd.pid /var/lock/apache2/* 2>/dev/null || true'
 docker compose up -d --force-recreate freepbx
 
-until docker compose exec -T freepbx asterisk -rx 'core show version' >/dev/null 2>&1; do
-  sleep 3
-done
-
-sleep 10
-docker compose exec -T freepbx fwconsole reload
+wait_for_asterisk
+reload_freepbx
 docker compose exec -T freepbx asterisk -rx 'pjsip show transports'
 docker compose exec -T freepbx asterisk -rx 'rtp show settings'
