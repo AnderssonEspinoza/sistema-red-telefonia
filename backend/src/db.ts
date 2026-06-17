@@ -173,6 +173,27 @@ export async function createUsuario(input: {
   return result.rows[0];
 }
 
+export async function updateUsuarioByExtension(
+  extension: string,
+  input: {
+    nombre: string;
+    procedencia?: string | null;
+    area?: string | null;
+  }
+): Promise<Usuario | null> {
+  const result = await pool.query<Usuario>(
+    `UPDATE usuarios
+     SET nombre = $1,
+         procedencia = $2,
+         area = $3
+     WHERE extension = $4
+     RETURNING *`,
+    [input.nombre, input.procedencia ?? null, input.area ?? null, extension]
+  );
+
+  return result.rows[0] ?? null;
+}
+
 export async function listAuditActions(limit = 50): Promise<AuditAction[]> {
   const result = await pool.query<AuditAction>(
     `SELECT *

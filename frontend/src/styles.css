@@ -789,7 +789,7 @@ td {
 .user-row,
 .recording-row {
   align-items: center;
-  grid-template-columns: minmax(0, 1fr) auto 20px;
+  grid-template-columns: minmax(0, 1fr) auto 20px 30px;
   gap: 10px;
   min-height: 58px;
   padding: 10px 16px;
@@ -802,6 +802,12 @@ td {
 
 .warn-icon {
   color: #d75f16;
+}
+
+.user-form input:disabled {
+  background: #f1f0ee;
+  color: #69717a;
+  cursor: not-allowed;
 }
 
 .metric-row {

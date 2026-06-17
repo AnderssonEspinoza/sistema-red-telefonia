@@ -14,6 +14,7 @@ import {
   LogOut,
   Phone,
   PhoneCall,
+  Pencil,
   Play,
   Plus,
   RadioTower,
@@ -26,7 +27,8 @@ import {
   UserRound,
   Users,
   Wifi,
-  WifiOff
+  WifiOff,
+  X
 } from "lucide-react";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
@@ -370,6 +372,7 @@ export function App() {
   const [form, setForm] = useState<UsuarioForm>(emptyForm);
   const [formNotice, setFormNotice] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [editingExtension, setEditingExtension] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [dialingLead, setDialingLead] = useState(false);
   const [analyzingText, setAnalyzingText] = useState(false);
@@ -502,6 +505,10 @@ export function App() {
         if (event.type === "USER_CREATED") {
           setUsuarios((current) => upsertById(current, event.payload).sort(byExtension));
         }
+
+        if (event.type === "USER_UPDATED") {
+          setUsuarios((current) => upsertById(current, event.payload).sort(byExtension));
+        }
       };
     };
 
@@ -525,6 +532,29 @@ export function App() {
     setFormError(null);
 
     try {
+      if (editingExtension) {
+        const response = await apiFetch(`/api/users/${editingExtension}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            nombre: form.nombre,
+            procedencia: form.procedencia || null,
+            area: form.area || null
+          })
+        });
+        const body = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(body?.error ?? "No se pudo actualizar");
+        }
+
+        setForm(emptyForm);
+        setEditingExtension(null);
+        setFormNotice(`Usuario ${body.extension} actualizado`);
+        await loadData();
+        return;
+      }
+
       const response = await apiFetch("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -556,6 +586,29 @@ export function App() {
     } finally {
       setSaving(false);
     }
+  }
+
+  function startEditingUser(user: Usuario) {
+    setEditingExtension(user.extension);
+    setForm({
+      nombre: user.nombre,
+      extension: user.extension,
+      procedencia: user.procedencia ?? "",
+      area: user.area ?? "",
+      sipSecret: "",
+      provisionFreepbx: false,
+      recordCalls: true
+    });
+    setFormNotice(null);
+    setFormError(null);
+    document.getElementById("usuario-form")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function cancelEditingUser() {
+    setEditingExtension(null);
+    setForm(emptyForm);
+    setFormNotice(null);
+    setFormError(null);
   }
 
   async function simulateCall() {
@@ -1153,6 +1206,14 @@ export function App() {
                       </div>
                       <code>{user.extension}</code>
                       {runtime?.reachable === false && <AlertTriangle className="warn-icon" size={18} />}
+                      <button
+                        className="icon-button compact"
+                        type="button"
+                        onClick={() => startEditingUser(user)}
+                        aria-label={`Editar ${user.extension}`}
+                      >
+                        <Pencil size={14} />
+                      </button>
                     </div>
                   );
                 })}
@@ -1222,7 +1283,11 @@ export function App() {
               </div>
             </Panel>
 
-            <Panel title="Alta rapida - registrar" icon={<PhoneCall size={20} />}>
+            <Panel
+              id="usuario-form"
+              title={editingExtension ? `Editar usuario ${editingExtension}` : "Alta rapida - registrar"}
+              icon={<PhoneCall size={20} />}
+            >
               <form className="user-form" onSubmit={(event) => void submitUser(event)}>
                 <label>
                   Nombre
@@ -1241,6 +1306,7 @@ export function App() {
                     pattern="[0-9]{2,10}"
                     placeholder="Ej. 1003"
                     value={form.extension}
+                    disabled={Boolean(editingExtension)}
                     onChange={(event) =>
                       setForm((current) => ({
                         ...current,
@@ -1253,15 +1319,17 @@ export function App() {
                     }
                   />
                 </label>
-                <label>
-                  Clave SIP
-                  <input
-                    required={form.provisionFreepbx}
-                    placeholder="Telefonia1003"
-                    value={form.sipSecret}
-                    onChange={(event) => setForm((current) => ({ ...current, sipSecret: event.target.value }))}
-                  />
-                </label>
+                {!editingExtension && (
+                  <label>
+                    Clave SIP
+                    <input
+                      required={form.provisionFreepbx}
+                      placeholder="Telefonia1003"
+                      value={form.sipSecret}
+                      onChange={(event) => setForm((current) => ({ ...current, sipSecret: event.target.value }))}
+                    />
+                  </label>
+                )}
                 <label>
                   Procedencia
                   <input
@@ -1278,29 +1346,37 @@ export function App() {
                     onChange={(event) => setForm((current) => ({ ...current, area: event.target.value }))}
                   />
                 </label>
-                <div className="switch-row">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={form.provisionFreepbx}
-                      onChange={(event) => setForm((current) => ({ ...current, provisionFreepbx: event.target.checked }))}
-                    />
-                    Crear extension en FreePBX
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={form.recordCalls}
-                      onChange={(event) => setForm((current) => ({ ...current, recordCalls: event.target.checked }))}
-                    />
-                    Grabar llamadas
-                  </label>
-                </div>
+                {!editingExtension && (
+                  <div className="switch-row">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={form.provisionFreepbx}
+                        onChange={(event) => setForm((current) => ({ ...current, provisionFreepbx: event.target.checked }))}
+                      />
+                      Crear extension en FreePBX
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={form.recordCalls}
+                        onChange={(event) => setForm((current) => ({ ...current, recordCalls: event.target.checked }))}
+                      />
+                      Grabar llamadas
+                    </label>
+                  </div>
+                )}
                 {formNotice && <p className="form-success">{formNotice}</p>}
                 {formError && <p className="form-error">{formError}</p>}
+                {editingExtension && (
+                  <button className="secondary-button full" type="button" onClick={cancelEditingUser}>
+                    <X size={18} />
+                    Cancelar edicion
+                  </button>
+                )}
                 <button className="primary-button full" type="submit" disabled={saving}>
-                  <Plus size={18} />
-                  Registrar
+                  {editingExtension ? <Pencil size={18} /> : <Plus size={18} />}
+                  {editingExtension ? "Guardar cambios" : "Registrar"}
                 </button>
               </form>
             </Panel>

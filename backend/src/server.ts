@@ -22,6 +22,7 @@ import {
   recordAuditAction,
   setLlamadaEvidence,
   type Llamada,
+  updateUsuarioByExtension,
   upsertAmiLlamada
 } from "./db.js";
 import {
@@ -89,6 +90,12 @@ const usuarioSchema = z.object({
     .optional()
     .nullable(),
   recordCalls: z.boolean().default(true)
+});
+
+const usuarioUpdateSchema = z.object({
+  nombre: z.string().min(2).max(100),
+  procedencia: z.string().max(100).optional().nullable(),
+  area: z.string().max(100).optional().nullable()
 });
 
 const simulateCallSchema = z.object({
@@ -431,6 +438,39 @@ app.post("/api/users", async (request, response, next) => {
     });
     broadcast("USER_CREATED", usuario);
     response.status(201).json({ ...usuario, provisioning, sipSecret: input.provisionFreepbx ? sipSecret : null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/users/:extension", async (request, response, next) => {
+  try {
+    const extension = z.string().regex(/^\d{2,10}$/).parse(request.params.extension);
+    const input = usuarioUpdateSchema.parse(request.body);
+    const usuario = await updateUsuarioByExtension(extension, {
+      nombre: input.nombre,
+      procedencia: input.procedencia,
+      area: input.area
+    });
+
+    if (!usuario) {
+      response.status(404).json({ error: "Usuario no encontrado" });
+      return;
+    }
+
+    void writeAudit(request, {
+      accion: "user.updated",
+      entidad: "usuario",
+      entidadId: usuario.id,
+      detalle: {
+        extension: usuario.extension,
+        nombre: usuario.nombre,
+        area: usuario.area,
+        procedencia: usuario.procedencia
+      }
+    });
+    broadcast("USER_UPDATED", usuario);
+    response.json(usuario);
   } catch (error) {
     next(error);
   }
