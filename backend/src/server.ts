@@ -195,6 +195,34 @@ app.get("/api/system", async (_request, response) => {
   response.json(await buildSystemStatus());
 });
 
+app.get("/api/telephony/network/detect", async (request, response, next) => {
+  try {
+    const host = String(request.headers["x-forwarded-host"] ?? request.headers.host ?? "").split(",")[0].trim();
+    const requestHost = host.split(":")[0];
+    const provisioner = await checkFreepbxProvisioner();
+    const configuredIp = "network" in provisioner ? provisioner.network?.externip ?? null : null;
+    const detectedIp = isUsableLanIp(requestHost) ? requestHost : configuredIp;
+
+    if (!detectedIp) {
+      response.status(404).json({ error: "No se pudo detectar una IP LAN utilizable" });
+      return;
+    }
+
+    const lanCidr = suggestCidr(detectedIp);
+
+    response.json({
+      lanIp: detectedIp,
+      lanCidr,
+      lanNet: networkAddress(detectedIp, lanCidr),
+      source: isUsableLanIp(requestHost) ? "request-host" : "freepbx-config",
+      current: configuredIp,
+      requestHost: requestHost || null
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/observability", async (_request, response) => {
   const [stats, cdr, audit, recordings, callCenter] = await Promise.all([
     getCallStats(),
@@ -786,6 +814,31 @@ async function checkDatabaseWithCircuit() {
       circuit: dbCircuit.snapshot()
     };
   }
+}
+
+function isUsableLanIp(value: string | null | undefined) {
+  if (!value || !/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(value)) {
+    return false;
+  }
+
+  return !["127.", "0.", "169.254."].some((prefix) => value.startsWith(prefix)) && value !== "localhost";
+}
+
+function suggestCidr(ip: string) {
+  if (ip.startsWith("10.")) {
+    return 16;
+  }
+
+  return 24;
+}
+
+function networkAddress(ip: string, cidr: number) {
+  const parts = ip.split(".").map((part) => Number(part));
+  const mask = cidr === 0 ? 0 : (0xffffffff << (32 - cidr)) >>> 0;
+  const address = parts.reduce((acc, part) => ((acc << 8) + part) >>> 0, 0);
+  const network = (address & mask) >>> 0;
+
+  return [24, 16, 8, 0].map((shift) => (network >>> shift) & 255).join(".");
 }
 
 async function buildExtensionStatus() {

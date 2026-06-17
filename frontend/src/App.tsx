@@ -392,6 +392,7 @@ export function App() {
   const [networkNotice, setNetworkNotice] = useState<string | null>(null);
   const [networkError, setNetworkError] = useState<string | null>(null);
   const [applyingNetwork, setApplyingNetwork] = useState(false);
+  const [detectingNetwork, setDetectingNetwork] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dialingLead, setDialingLead] = useState(false);
   const [analyzingText, setAnalyzingText] = useState(false);
@@ -665,6 +666,41 @@ export function App() {
       setNetworkError(error instanceof Error ? error.message : "No se pudo aplicar la red");
     } finally {
       setApplyingNetwork(false);
+    }
+  }
+
+  async function detectTelephonyNetwork() {
+    setDetectingNetwork(true);
+    setNetworkNotice(null);
+    setNetworkError(null);
+
+    try {
+      const browserHost = window.location.hostname;
+
+      if (isUsableIpv4(browserHost)) {
+        const cidr = suggestCidr(browserHost);
+        setNetworkForm({ lanIp: browserHost, lanCidr: String(cidr) });
+        setNetworkNotice(`IP detectada desde el navegador: ${browserHost}`);
+        return;
+      }
+
+      const response = await apiFetch("/api/telephony/network/detect");
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(body?.error ?? "No se pudo detectar la red");
+      }
+
+      setNetworkForm({ lanIp: body.lanIp, lanCidr: String(body.lanCidr) });
+      setNetworkNotice(
+        body.source === "freepbx-config"
+          ? `Sugerencia cargada desde FreePBX: ${body.lanIp}`
+          : `IP detectada: ${body.lanIp}`
+      );
+    } catch (error) {
+      setNetworkError(error instanceof Error ? error.message : "No se pudo detectar la red");
+    } finally {
+      setDetectingNetwork(false);
     }
   }
 
@@ -1303,6 +1339,10 @@ export function App() {
 
             <Panel id="configuracion" title="Red SIP/RTP" icon={<RadioTower size={20} />}>
               <form className="user-form" onSubmit={(event) => void applyTelephonyNetwork(event)}>
+                <button className="secondary-button full" type="button" disabled={detectingNetwork} onClick={() => void detectTelephonyNetwork()}>
+                  <RefreshCw size={18} />
+                  {detectingNetwork ? "Detectando" : "Detectar IP actual"}
+                </button>
                 <label>
                   IP del servidor
                   <input
@@ -1712,6 +1752,24 @@ function previewNetwork(ip: string, cidr: number) {
   const networkIp = [24, 16, 8, 0].map((shift) => (network >>> shift) & 255).join(".");
 
   return `${networkIp}/${cidr}`;
+}
+
+function isUsableIpv4(value: string) {
+  const parts = value.split(".").map((part) => Number(part));
+
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  return !value.startsWith("127.") && !value.startsWith("169.254.") && value !== "0.0.0.0";
+}
+
+function suggestCidr(ip: string) {
+  if (ip.startsWith("10.")) {
+    return 16;
+  }
+
+  return 24;
 }
 
 function formatTime(value: string | null | undefined) {
