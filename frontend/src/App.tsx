@@ -930,6 +930,8 @@ export function App() {
   const leads = callCenter?.leads.leads ?? [];
   const nextLead = callCenter?.leads.nextLead ?? null;
   const transcripts = callCenter?.transcripts.transcripts ?? [];
+  const companyExtensions = extensionStatuses.filter((extension) => !isSimulatedClientExtension(extension.extension));
+  const clientExtensions = extensionStatuses.filter((extension) => isSimulatedClientExtension(extension.extension));
   const callCenterHealth = callCenter?.health ?? health?.callCenter ?? observability?.callCenter ?? null;
   const callCenterState = callCenterHealth ? (callCenterHealth.ok ? "OK" : "FALLA") : undefined;
   const networkPreview = previewNetwork(networkForm.lanIp, Number(networkForm.lanCidr));
@@ -1103,17 +1105,8 @@ export function App() {
 
               <Panel id="extensiones" title="Softphones - extensiones" icon={<Headphones size={20} />} className="softphone-panel">
                 <div className="extension-list">
-                  {extensionStatuses.map((extension) => (
-                    <div className="extension-row" key={extension.extension}>
-                      {extension.reachable === false ? <WifiOff size={17} /> : <Wifi size={17} />}
-                      <code>{extension.extension}</code>
-                      <div className="row-main">
-                        <strong>{extension.nombre ?? "Extension"}</strong>
-                        <span>{extension.area ?? extension.technology}</span>
-                      </div>
-                      <StatusPill value={extension.reachable === false ? "NO DISPONIBLE" : extension.status} />
-                    </div>
-                  ))}
+                  <ExtensionZone title="Red privada 1 - Empresa / Call Center" subtitle="Soporte, marketing, ventas, supervisores y agentes" extensions={companyExtensions} />
+                  <ExtensionZone title="Red privada 2 - Clientes simulados" subtitle="Clientes demo para pruebas de llamadas y campanas" extensions={clientExtensions} />
                 </div>
               </Panel>
             </section>
@@ -1596,6 +1589,37 @@ function ProviderIcon({ supplier }: { supplier: DemoSupplier }) {
   return <FileText className="provider-icon dark" size={27} />;
 }
 
+function ExtensionZone({
+  title,
+  subtitle,
+  extensions
+}: {
+  title: string;
+  subtitle: string;
+  extensions: ExtensionRuntimeStatus[];
+}) {
+  return (
+    <div className="extension-zone">
+      <div className="zone-heading">
+        <strong>{title}</strong>
+        <span>{subtitle}</span>
+      </div>
+      {extensions.length === 0 && <p className="empty-note">Sin extensiones registradas en esta zona.</p>}
+      {extensions.map((extension) => (
+        <div className="extension-row" key={extension.extension}>
+          {extension.reachable === false ? <WifiOff size={17} /> : <Wifi size={17} />}
+          <code>{extension.extension}</code>
+          <div className="row-main">
+            <strong>{extension.nombre ?? "Extension"}</strong>
+            <span>{extension.area ?? extension.technology}</span>
+          </div>
+          <StatusPill value={extension.reachable === false ? "NO DISPONIBLE" : extension.status} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MetricRow({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="metric-row">
@@ -1737,6 +1761,11 @@ function upsertById<T extends { id: number }>(items: T[], item: T): T[] {
 
 function byExtension(a: Usuario, b: Usuario) {
   return a.extension.localeCompare(b.extension);
+}
+
+function isSimulatedClientExtension(extension: string) {
+  const value = Number(extension);
+  return Number.isInteger(value) && value >= 9000 && value <= 9999;
 }
 
 function previewNetwork(ip: string, cidr: number) {

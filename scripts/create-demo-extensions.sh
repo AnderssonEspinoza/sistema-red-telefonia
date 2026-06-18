@@ -16,12 +16,36 @@ include "/etc/freepbx.conf";
 
 $core = FreePBX::Core();
 $extensions = [
-    ['ext' => '1001', 'name' => 'Juan Perez', 'secret' => 'Telefonia1001'],
-    ['ext' => '1002', 'name' => 'Maria Lopez', 'secret' => 'Telefonia1002'],
+    ['ext' => '1001', 'name' => 'Soporte - Juan Perez', 'secret' => 'Telefonia1001'],
+    ['ext' => '1002', 'name' => 'Agente - Maria Lopez', 'secret' => 'Telefonia1002'],
+    ['ext' => '2001', 'name' => 'Marketing - Campanas', 'secret' => 'Telefonia2001'],
+    ['ext' => '3001', 'name' => 'Ventas - Asesor', 'secret' => 'Telefonia3001'],
+    ['ext' => '4001', 'name' => 'Supervisor - Call Center', 'secret' => 'Telefonia4001'],
+    ['ext' => '9001', 'name' => 'Cliente Carlos', 'secret' => 'Telefonia9001'],
+    ['ext' => '9002', 'name' => 'Cliente Maria', 'secret' => 'Telefonia9002'],
+    ['ext' => '9003', 'name' => 'Cliente Empresa Demo', 'secret' => 'Telefonia9003'],
+    ['ext' => '9004', 'name' => 'Cliente Reclamo', 'secret' => 'Telefonia9004'],
+    ['ext' => '9005', 'name' => 'Cliente Interesado', 'secret' => 'Telefonia9005'],
 ];
 
 foreach ($extensions as $item) {
-    if ($core->getDevice($item['ext']) || $core->getUser($item['ext'])) {
+    $device = $core->getDevice($item['ext']);
+    $user = $core->getUser($item['ext']);
+    $wasPartial = (bool)(($device && !$user) || (!$device && $user));
+
+    if ($wasPartial) {
+        echo "Extension {$item['ext']} parcial, reparando\n";
+        if ($device) {
+            $core->delDevice($item['ext']);
+        }
+        if ($user) {
+            $core->delUser($item['ext']);
+        }
+        $device = null;
+        $user = null;
+    }
+
+    if ($device && $user) {
         echo "Extension {$item['ext']} ya existe\n";
         applyRecordingSettings($item['ext']);
         continue;
@@ -50,18 +74,22 @@ foreach ($extensions as $item) {
 
 function applyRecordingSettings(string $extension): void
 {
-    $astman = FreePBX::astman();
-    $settings = [
-        'recording/in/internal' => 'always',
-        'recording/out/internal' => 'always',
-        'recording/in/external' => 'always',
-        'recording/out/external' => 'always',
-        'recording/ondemand' => 'disabled',
-        'recording/priority' => '10',
-    ];
+    try {
+        $astman = FreePBX::astman();
+        $settings = [
+            'recording/in/internal' => 'always',
+            'recording/out/internal' => 'always',
+            'recording/in/external' => 'always',
+            'recording/out/external' => 'always',
+            'recording/ondemand' => 'disabled',
+            'recording/priority' => '10',
+        ];
 
-    foreach ($settings as $key => $value) {
-        $astman->database_put('AMPUSER', $extension . '/' . $key, $value);
+        foreach ($settings as $key => $value) {
+            $astman->database_put('AMPUSER', $extension . '/' . $key, $value);
+        }
+    } catch (Throwable $error) {
+        echo "No se pudo aplicar grabacion en {$extension}: {$error->getMessage()}\n";
     }
 }
 
@@ -74,7 +102,7 @@ $settings = [
 ];
 $db = FreePBX::Database();
 foreach ($settings as $keyword => $value) {
-    $stmt = $db->prepare("UPDATE sip SET data = ? WHERE keyword = ? AND id IN ('1001', '1002')");
+    $stmt = $db->prepare("UPDATE sip SET data = ? WHERE keyword = ?");
     $stmt->execute([$value, $keyword]);
 }
 PHP

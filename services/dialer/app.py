@@ -139,14 +139,20 @@ def list_calls() -> dict[str, Any]:
 
 
 def seed_leads() -> None:
-    if redis_client.exists("campaign:default:seeded"):
+    leads = [
+        Lead(id="lead-9005", name="Cliente Interesado", phone="9005", priority=95),
+        Lead(id="lead-9001", name="Cliente Carlos", phone="9001", priority=88),
+        Lead(id="lead-9004", name="Cliente Reclamo", phone="9004", priority=80),
+        Lead(id="lead-9003", name="Cliente Empresa Demo", phone="9003", priority=70),
+    ]
+
+    if redis_client.exists("campaign:default:seeded") and all(redis_client.exists(f"lead:{lead.id}") for lead in leads):
         return
 
-    leads = [
-        Lead(id="lead-1002", name="Maria Lopez", phone="1002", priority=95),
-        Lead(id="lead-demo-1", name="Cliente interesado", phone="1002", priority=88),
-        Lead(id="lead-demo-2", name="Cliente precio", phone="1002", priority=80),
-    ]
+    for old_lead_id in ["lead-1002", "lead-demo-1", "lead-demo-2"]:
+        redis_client.delete(f"lead:{old_lead_id}")
+        redis_client.zrem("campaign:default:pending", old_lead_id)
+
     for lead in leads:
         save_lead(lead)
         redis_client.zadd("campaign:default:pending", {lead.id: lead.priority})

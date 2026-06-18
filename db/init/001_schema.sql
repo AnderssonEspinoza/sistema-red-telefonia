@@ -60,6 +60,14 @@ CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_entidad ON auditoria_acciones 
 
 INSERT INTO usuarios (nombre, extension, procedencia, area)
 VALUES
-  ('Juan Perez', '1001', 'Lima', 'Soporte'),
-  ('Maria Lopez', '1002', 'Arequipa', 'Ventas')
+  ('Juan Perez', '1001', 'Red Empresa', 'Soporte'),
+  ('Maria Lopez', '1002', 'Red Empresa', 'Agente'),
+  ('Equipo Marketing', '2001', 'Red Empresa', 'Marketing'),
+  ('Asesor Ventas', '3001', 'Red Empresa', 'Ventas'),
+  ('Supervisor Call Center', '4001', 'Red Empresa', 'Supervisores'),
+  ('Cliente Carlos', '9001', 'Red Clientes Simulados', 'Cliente interesado'),
+  ('Cliente Maria', '9002', 'Red Clientes Simulados', 'Cliente ventas'),
+  ('Cliente Empresa Demo', '9003', 'Red Clientes Simulados', 'Cliente empresa'),
+  ('Cliente Reclamo', '9004', 'Red Clientes Simulados', 'Cliente reclamo'),
+  ('Cliente Interesado', '9005', 'Red Clientes Simulados', 'Cliente interesado')
 ON CONFLICT (extension) DO NOTHING;
