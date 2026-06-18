@@ -33,6 +33,21 @@ export interface AmiStatus {
   circuit: ReturnType<CircuitBreaker["snapshot"]>;
 }
 
+export interface AmiOriginateInput {
+  fromExtension: string;
+  toExtension: string;
+  mode?: "audio" | "video";
+}
+
+export interface AmiOriginateResult {
+  ok: boolean;
+  actionId: string;
+  fromExtension: string;
+  toExtension: string;
+  mode: "audio" | "video";
+  response: string;
+}
+
 type AmiHandler = (event: AmiCallEvent) => Promise<void>;
 
 const enabled = process.env.AMI_ENABLED === "true";
@@ -110,6 +125,35 @@ export function getExtensionStatuses(): ExtensionStatus[] {
   return [...extensionStatuses.values()].sort((a, b) => a.extension.localeCompare(b.extension));
 }
 
+export async function originateExtensionCall(input: AmiOriginateInput): Promise<AmiOriginateResult> {
+  const mode = input.mode ?? "audio";
+  const actionId = `panel-${Date.now()}-${input.fromExtension}-${input.toExtension}`;
+  const response = await withAmiConnection(async (amiSocket) => {
+    sendAmiActionToSocket(amiSocket, {
+      Action: "Originate",
+      ActionID: actionId,
+      Channel: `PJSIP/${input.fromExtension}`,
+      Context: "from-internal",
+      Exten: input.toExtension,
+      Priority: "1",
+      CallerID: `${mode === "video" ? "Video" : "Panel"} <${input.fromExtension}>`,
+      Variable: `PANEL_CALL_MODE=${mode}`,
+      Async: "true"
+    });
+
+    return readAmiFrame(amiSocket);
+  });
+
+  return {
+    ok: /Response:\s*(Success|Follows)/i.test(response),
+    actionId,
+    fromExtension: input.fromExtension,
+    toExtension: input.toExtension,
+    mode,
+    response
+  };
+}
+
 export function startAmiListener(handler: AmiHandler) {
   if (!enabled) {
     return;
@@ -178,6 +222,84 @@ function sendAmiAction(fields: Record<string, string>) {
     .join("\r\n");
 
   socket.write(`${payload}\r\n\r\n`);
+}
+
+async function withAmiConnection<T>(operation: (amiSocket: net.Socket) => Promise<T>): Promise<T> {
+  return circuit.execute(async () => {
+    assertSupplierAvailable("ami");
+
+    const amiSocket = net.createConnection({ host, port });
+    amiSocket.setEncoding("utf8");
+    amiSocket.setTimeout(5000);
+
+    try {
+      await waitForConnect(amiSocket);
+      await readAmiFrame(amiSocket);
+      sendAmiActionToSocket(amiSocket, {
+        Action: "Login",
+        Username: username,
+        Secret: secret,
+        Events: "off"
+      });
+
+      const loginResponse = await readAmiFrame(amiSocket);
+      if (!/Response:\s*Success/i.test(loginResponse)) {
+        throw new Error(loginResponse.trim() || "AMI login failed");
+      }
+
+      return await operation(amiSocket);
+    } finally {
+      sendAmiActionToSocket(amiSocket, { Action: "Logoff" });
+      amiSocket.destroy();
+    }
+  });
+}
+
+function waitForConnect(amiSocket: net.Socket) {
+  return new Promise<void>((resolve, reject) => {
+    amiSocket.once("connect", () => resolve());
+    amiSocket.once("error", reject);
+    amiSocket.once("timeout", () => reject(new Error("AMI connection timeout")));
+  });
+}
+
+function readAmiFrame(amiSocket: net.Socket) {
+  return new Promise<string>((resolve, reject) => {
+    let buffer = "";
+
+    const cleanup = () => {
+      amiSocket.off("data", onData);
+      amiSocket.off("error", onError);
+      amiSocket.off("timeout", onTimeout);
+    };
+    const onData = (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      if (buffer.includes("\r\n\r\n")) {
+        cleanup();
+        resolve(buffer.slice(0, buffer.indexOf("\r\n\r\n")));
+      }
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onTimeout = () => {
+      cleanup();
+      reject(new Error("AMI read timeout"));
+    };
+
+    amiSocket.on("data", onData);
+    amiSocket.once("error", onError);
+    amiSocket.once("timeout", onTimeout);
+  });
+}
+
+function sendAmiActionToSocket(amiSocket: net.Socket, fields: Record<string, string>) {
+  const payload = Object.entries(fields)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("\r\n");
+
+  amiSocket.write(`${payload}\r\n\r\n`);
 }
 
 async function processFrame(frame: string, handler: AmiHandler) {

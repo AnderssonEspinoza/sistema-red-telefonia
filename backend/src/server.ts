@@ -4,7 +4,7 @@ import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
-import { checkAmi, getExtensionStatuses, setAmiCircuitDemo, startAmiListener } from "./ami.js";
+import { checkAmi, getExtensionStatuses, originateExtensionCall, setAmiCircuitDemo, startAmiListener } from "./ami.js";
 import { authConfig, login, requireAuth, verifyToken } from "./auth.js";
 import { checkCdr, listRecentCdr, listRecentCdrRecordings, reconcileCallsWithCdr } from "./cdr.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
@@ -110,6 +110,12 @@ const telephonyNetworkSchema = z.object({
 const simulateCallSchema = z.object({
   extensionOrigen: z.string().regex(/^\d{2,10}$/),
   extensionDestino: z.string().regex(/^\d{2,10}$/)
+});
+
+const originateCallSchema = z.object({
+  extensionOrigen: z.string().regex(/^\d{2,10}$/),
+  extensionDestino: z.string().regex(/^\d{2,10}$/),
+  mode: z.enum(["audio", "video"]).default("audio")
 });
 
 const dialNextSchema = z.object({
@@ -604,6 +610,47 @@ app.post("/api/simulate-call", async (request, response, next) => {
       }
     });
     response.status(201).json(llamada);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/calls/originate", async (request, response, next) => {
+  try {
+    const input = originateCallSchema.parse(request.body);
+    const originate = await originateExtensionCall({
+      fromExtension: input.extensionOrigen,
+      toExtension: input.extensionDestino,
+      mode: input.mode
+    });
+    const llamada = await registerCallEvent({
+      extensionOrigen: input.extensionOrigen,
+      extensionDestino: input.extensionDestino,
+      estado: originate.ok ? "RINGING" : "FAILED",
+      fuente: "panel",
+      eventType: input.mode === "video" ? "PANEL_VIDEO_ORIGINATE" : "PANEL_AUDIO_ORIGINATE",
+      rawEvent: {
+        type: "PANEL_ORIGINATE",
+        mode: input.mode,
+        actionId: originate.actionId,
+        amiResponse: originate.response
+      }
+    });
+
+    void writeAudit(request, {
+      accion: input.mode === "video" ? "call.video.originated" : "call.audio.originated",
+      entidad: "llamada",
+      entidadId: llamada.id,
+      detalle: {
+        extensionOrigen: input.extensionOrigen,
+        extensionDestino: input.extensionDestino,
+        mode: input.mode,
+        actionId: originate.actionId,
+        ok: originate.ok
+      }
+    });
+
+    response.status(originate.ok ? 201 : 502).json({ llamada, originate });
   } catch (error) {
     next(error);
   }

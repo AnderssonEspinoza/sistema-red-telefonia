@@ -26,6 +26,7 @@ import {
   Square,
   UserRound,
   Users,
+  Video,
   Wifi,
   WifiOff,
   X
@@ -398,6 +399,8 @@ export function App() {
   const [analyzingText, setAnalyzingText] = useState(false);
   const [callCenterNotice, setCallCenterNotice] = useState<string | null>(null);
   const [callCenterError, setCallCenterError] = useState<string | null>(null);
+  const [directCallOrigin, setDirectCallOrigin] = useState("1001");
+  const [callingTarget, setCallingTarget] = useState<string | null>(null);
   const [togglingSupplier, setTogglingSupplier] = useState<DemoSupplier | null>(null);
   const [page, setPage] = useState(1);
   const [activeNav, setActiveNav] = useState("resumen");
@@ -721,6 +724,36 @@ export function App() {
     await loadData();
   }
 
+  async function originatePanelCall(destination: string, mode: "audio" | "video" = "audio") {
+    setCallingTarget(`${mode}:${destination}`);
+    setCallCenterNotice(null);
+    setCallCenterError(null);
+
+    try {
+      const response = await apiFetch("/api/calls/originate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          extensionOrigen: directCallOrigin,
+          extensionDestino: destination,
+          mode
+        })
+      });
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(body?.originate?.response ?? body?.error ?? "No se pudo originar llamada");
+      }
+
+      setCallCenterNotice(`${mode === "video" ? "Video llamada" : "Llamada"} ${directCallOrigin} -> ${destination} enviada a Asterisk`);
+      await loadData();
+    } catch (error) {
+      setCallCenterError(error instanceof Error ? error.message : "No se pudo originar llamada");
+    } finally {
+      setCallingTarget(null);
+    }
+  }
+
   async function toggleFailure(supplier: DemoSupplier, enabled: boolean) {
     setTogglingSupplier(supplier);
 
@@ -1004,11 +1037,10 @@ export function App() {
 
   function navigateToSection(sectionId: string) {
     setActiveNav(sectionId);
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   return (
-    <main className="app-frame">
+    <main className={`app-frame view-${activeNav}`}>
       <aside className="sidebar">
         <div className="brand-block">
           <div className="brand-icon">
@@ -1024,7 +1056,8 @@ export function App() {
           <SidebarItem active={activeNav === "resumen"} icon={<Home size={20} />} label="Resumen" onClick={() => navigateToSection("resumen")} />
           <SidebarItem active={activeNav === "callcenter"} icon={<PhoneCall size={20} />} label="Call Center" onClick={() => navigateToSection("callcenter")} />
           <SidebarItem active={activeNav === "llamadas"} icon={<PhoneCall size={20} />} label="Llamadas" onClick={() => navigateToSection("llamadas")} />
-          <SidebarItem active={activeNav === "extensiones"} icon={<SlidersHorizontal size={20} />} label="Extensiones" onClick={() => navigateToSection("extensiones")} />
+          <SidebarItem active={activeNav === "extensiones"} icon={<SlidersHorizontal size={20} />} label="Empresa" onClick={() => navigateToSection("extensiones")} />
+          <SidebarItem active={activeNav === "clientes"} icon={<Users size={20} />} label="Clientes" onClick={() => navigateToSection("clientes")} />
           <SidebarItem active={activeNav === "proveedores"} icon={<Settings size={20} />} label="Proveedores" onClick={() => navigateToSection("proveedores")} />
           <SidebarItem active={activeNav === "usuarios"} icon={<Users size={20} />} label="Usuarios" onClick={() => navigateToSection("usuarios")} />
           <SidebarItem active={activeNav === "configuracion"} icon={<RadioTower size={20} />} label="Red SIP/RTP" onClick={() => navigateToSection("configuracion")} />
@@ -1074,6 +1107,22 @@ export function App() {
           ))}
         </section>
 
+        <section className="direct-call-toolbar" aria-label="Marcacion directa">
+          <label>
+            Llamar desde
+            <select value={directCallOrigin} onChange={(event) => setDirectCallOrigin(event.target.value)}>
+              {companyExtensions.map((extension) => (
+                <option key={extension.extension} value={extension.extension}>
+                  {extension.extension} - {extension.nombre ?? extension.area ?? "Empresa"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span>
+            {directCallOrigin || "1001"} llama primero; al contestar se conecta con el destino seleccionado.
+          </span>
+        </section>
+
         <section className="dashboard-grid">
           <div className="main-column">
             <section className="top-panels">
@@ -1103,10 +1152,27 @@ export function App() {
                 </div>
               </Panel>
 
-              <Panel id="extensiones" title="Softphones - extensiones" icon={<Headphones size={20} />} className="softphone-panel">
+              <Panel id="extensiones" title="Red privada 1 - Empresa / Call Center" icon={<Headphones size={20} />} className="softphone-panel">
                 <div className="extension-list">
-                  <ExtensionZone title="Red privada 1 - Empresa / Call Center" subtitle="Soporte, marketing, ventas, supervisores y agentes" extensions={companyExtensions} />
-                  <ExtensionZone title="Red privada 2 - Clientes simulados" subtitle="Clientes demo para pruebas de llamadas y campanas" extensions={clientExtensions} />
+                  <ExtensionZone
+                    title="Empresa / Call Center"
+                    subtitle="Soporte, marketing, ventas, supervisores y agentes"
+                    extensions={companyExtensions}
+                    callingTarget={callingTarget}
+                    onCall={(extension, mode) => void originatePanelCall(extension, mode)}
+                  />
+                </div>
+              </Panel>
+
+              <Panel id="clientes" title="Red privada 2 - Clientes simulados" icon={<Users size={20} />} className="softphone-panel">
+                <div className="extension-list">
+                  <ExtensionZone
+                    title="Clientes simulados"
+                    subtitle="Carlos, Maria, empresa demo, reclamos e interesados"
+                    extensions={clientExtensions}
+                    callingTarget={callingTarget}
+                    onCall={(extension, mode) => void originatePanelCall(extension, mode)}
+                  />
                 </div>
               </Panel>
             </section>
@@ -1592,11 +1658,15 @@ function ProviderIcon({ supplier }: { supplier: DemoSupplier }) {
 function ExtensionZone({
   title,
   subtitle,
-  extensions
+  extensions,
+  callingTarget,
+  onCall
 }: {
   title: string;
   subtitle: string;
   extensions: ExtensionRuntimeStatus[];
+  callingTarget: string | null;
+  onCall: (extension: string, mode: "audio" | "video") => void;
 }) {
   return (
     <div className="extension-zone">
@@ -1614,6 +1684,26 @@ function ExtensionZone({
             <span>{extension.area ?? extension.technology}</span>
           </div>
           <StatusPill value={extension.reachable === false ? "NO DISPONIBLE" : extension.status} />
+          <div className="extension-actions">
+            <button
+              className="icon-button compact"
+              type="button"
+              disabled={callingTarget === `audio:${extension.extension}`}
+              onClick={() => onCall(extension.extension, "audio")}
+              aria-label={`Llamar a ${extension.extension}`}
+            >
+              <Phone size={14} />
+            </button>
+            <button
+              className="icon-button compact"
+              type="button"
+              disabled={callingTarget === `video:${extension.extension}`}
+              onClick={() => onCall(extension.extension, "video")}
+              aria-label={`Video llamada a ${extension.extension}`}
+            >
+              <Video size={14} />
+            </button>
+          </div>
         </div>
       ))}
     </div>
