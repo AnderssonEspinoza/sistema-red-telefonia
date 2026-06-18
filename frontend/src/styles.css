@@ -634,6 +634,76 @@ td span {
   display: grid;
 }
 
+.dial-section {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 14px;
+}
+
+.quick-dial-block {
+  display: grid;
+}
+
+.quick-dial-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+.quick-dial-card {
+  display: grid;
+  gap: 12px;
+  min-height: 112px;
+  align-content: space-between;
+  border: 1px solid #e3ded7;
+  border-radius: 7px;
+  background: #fbfaf8;
+  padding: 12px;
+}
+
+.quick-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.compact-action {
+  min-width: 0;
+  min-height: 36px;
+  gap: 7px;
+  padding: 0 10px;
+}
+
+.manual-dial-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin: 0 16px;
+  padding: 12px;
+  border: 1px solid #e3ded7;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.manual-dial-box label {
+  display: grid;
+  gap: 5px;
+  color: #5f6872;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.manual-dial-box input {
+  min-height: 38px;
+  border: 1px solid #d9d2ca;
+  border-radius: 6px;
+  background: #fbfaf8;
+  color: #25303b;
+  padding: 0 10px;
+}
+
 .extension-zone + .extension-zone {
   border-top: 1px solid #ded8d0;
 }
@@ -1179,6 +1249,10 @@ td {
   .direct-call-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .manual-dial-box {
+    grid-template-columns: 1fr;
   }
 
   .direct-call-toolbar span {

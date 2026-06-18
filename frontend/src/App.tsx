@@ -351,6 +351,11 @@ interface NetworkForm {
   lanCidr: string;
 }
 
+interface ManualDialForm {
+  company: string;
+  client: string;
+}
+
 interface LoginForm {
   username: string;
   password: string;
@@ -368,6 +373,10 @@ const emptyForm: UsuarioForm = {
 const emptyNetworkForm: NetworkForm = {
   lanIp: "",
   lanCidr: "16"
+};
+const emptyManualDialForm: ManualDialForm = {
+  company: "",
+  client: ""
 };
 const activeCallMaxAgeMs = 8 * 60 * 60 * 1000;
 const tokenStorageKey = "telefonia_auth_token";
@@ -400,6 +409,7 @@ export function App() {
   const [callCenterNotice, setCallCenterNotice] = useState<string | null>(null);
   const [callCenterError, setCallCenterError] = useState<string | null>(null);
   const [directCallOrigin, setDirectCallOrigin] = useState("1001");
+  const [manualDial, setManualDial] = useState<ManualDialForm>(emptyManualDialForm);
   const [callingTarget, setCallingTarget] = useState<string | null>(null);
   const [togglingSupplier, setTogglingSupplier] = useState<DemoSupplier | null>(null);
   const [page, setPage] = useState(1);
@@ -754,6 +764,17 @@ export function App() {
     }
   }
 
+  async function submitManualDial(event: FormEvent, target: "company" | "client") {
+    event.preventDefault();
+    const destination = target === "company" ? manualDial.company : manualDial.client;
+
+    if (!destination) {
+      return;
+    }
+
+    await originatePanelCall(destination, "audio");
+  }
+
   async function toggleFailure(supplier: DemoSupplier, enabled: boolean) {
     setTogglingSupplier(supplier);
 
@@ -965,6 +986,8 @@ export function App() {
   const transcripts = callCenter?.transcripts.transcripts ?? [];
   const companyExtensions = extensionStatuses.filter((extension) => !isSimulatedClientExtension(extension.extension));
   const clientExtensions = extensionStatuses.filter((extension) => isSimulatedClientExtension(extension.extension));
+  const companyQuickDial = buildCompanyQuickDial(companyExtensions);
+  const clientQuickDial = clientExtensions;
   const callCenterHealth = callCenter?.health ?? health?.callCenter ?? observability?.callCenter ?? null;
   const callCenterState = callCenterHealth ? (callCenterHealth.ok ? "OK" : "FALLA") : undefined;
   const networkPreview = previewNetwork(networkForm.lanIp, Number(networkForm.lanCidr));
@@ -1153,10 +1176,24 @@ export function App() {
               </Panel>
 
               <Panel id="extensiones" title="Red privada 1 - Empresa / Call Center" icon={<Headphones size={20} />} className="softphone-panel">
-                <div className="extension-list">
+                <div className="dial-section">
+                  <QuickDialGrid
+                    title="Marcacion rapida por area"
+                    subtitle="Selecciona el area interna y Asterisk conectara desde la extension origen."
+                    entries={companyQuickDial}
+                    callingTarget={callingTarget}
+                    onCall={(extension, mode) => void originatePanelCall(extension, mode)}
+                  />
+                  <ManualDialBox
+                    title="Marcacion interna manual"
+                    value={manualDial.company}
+                    placeholder="Ej. 1001, 2001, 3001"
+                    onChange={(value) => setManualDial((current) => ({ ...current, company: value }))}
+                    onSubmit={(event) => void submitManualDial(event, "company")}
+                  />
                   <ExtensionZone
-                    title="Empresa / Call Center"
-                    subtitle="Soporte, marketing, ventas, supervisores y agentes"
+                    title="Directorio empresa"
+                    subtitle="Extensiones internas disponibles en la red privada del call center"
                     extensions={companyExtensions}
                     callingTarget={callingTarget}
                     onCall={(extension, mode) => void originatePanelCall(extension, mode)}
@@ -1165,10 +1202,24 @@ export function App() {
               </Panel>
 
               <Panel id="clientes" title="Red privada 2 - Clientes simulados" icon={<Users size={20} />} className="softphone-panel">
-                <div className="extension-list">
+                <div className="dial-section">
+                  <QuickDialGrid
+                    title="Clientes"
+                    subtitle="Clientes simulados para probar llamadas de venta, soporte y reclamos."
+                    entries={clientQuickDial}
+                    callingTarget={callingTarget}
+                    onCall={(extension, mode) => void originatePanelCall(extension, mode)}
+                  />
+                  <ManualDialBox
+                    title="Marcacion a cliente manual"
+                    value={manualDial.client}
+                    placeholder="Ej. 9001, 9004, 9005"
+                    onChange={(value) => setManualDial((current) => ({ ...current, client: value }))}
+                    onSubmit={(event) => void submitManualDial(event, "client")}
+                  />
                   <ExtensionZone
-                    title="Clientes simulados"
-                    subtitle="Carlos, Maria, empresa demo, reclamos e interesados"
+                    title="Directorio clientes"
+                    subtitle="Contactos simulados registrados en la segunda red privada"
                     extensions={clientExtensions}
                     callingTarget={callingTarget}
                     onCall={(extension, mode) => void originatePanelCall(extension, mode)}
@@ -1655,6 +1706,95 @@ function ProviderIcon({ supplier }: { supplier: DemoSupplier }) {
   return <FileText className="provider-icon dark" size={27} />;
 }
 
+function QuickDialGrid({
+  title,
+  subtitle,
+  entries,
+  callingTarget,
+  onCall
+}: {
+  title: string;
+  subtitle: string;
+  entries: ExtensionRuntimeStatus[];
+  callingTarget: string | null;
+  onCall: (extension: string, mode: "audio" | "video") => void;
+}) {
+  return (
+    <div className="quick-dial-block">
+      <div className="zone-heading">
+        <strong>{title}</strong>
+        <span>{subtitle}</span>
+      </div>
+      <div className="quick-dial-grid">
+        {entries.map((entry) => (
+          <div className="quick-dial-card" key={entry.extension}>
+            <div className="row-main">
+              <strong>{entry.area ?? entry.nombre ?? "Extension"}</strong>
+              <span>
+                {entry.nombre ?? "Usuario"} - {entry.extension}
+              </span>
+            </div>
+            <div className="quick-actions">
+              <button
+                className="primary-button compact-action"
+                type="button"
+                disabled={callingTarget === `audio:${entry.extension}`}
+                onClick={() => onCall(entry.extension, "audio")}
+              >
+                <Phone size={16} />
+                Llamar
+              </button>
+              <button
+                className="secondary-button compact-action"
+                type="button"
+                disabled={callingTarget === `video:${entry.extension}`}
+                onClick={() => onCall(entry.extension, "video")}
+              >
+                <Video size={16} />
+                Video
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ManualDialBox({
+  title,
+  value,
+  placeholder,
+  onChange,
+  onSubmit
+}: {
+  title: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+  onSubmit: (event: FormEvent) => void;
+}) {
+  return (
+    <form className="manual-dial-box" onSubmit={onSubmit}>
+      <label>
+        {title}
+        <input
+          required
+          inputMode="numeric"
+          pattern="[0-9]{2,10}"
+          placeholder={placeholder}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </label>
+      <button className="primary-button compact-action" type="submit">
+        <PhoneCall size={16} />
+        Marcar
+      </button>
+    </form>
+  );
+}
+
 function ExtensionZone({
   title,
   subtitle,
@@ -1856,6 +1996,23 @@ function byExtension(a: Usuario, b: Usuario) {
 function isSimulatedClientExtension(extension: string) {
   const value = Number(extension);
   return Number.isInteger(value) && value >= 9000 && value <= 9999;
+}
+
+function buildCompanyQuickDial(extensions: ExtensionRuntimeStatus[]) {
+  const preferred = ["Soporte", "Marketing", "Ventas", "Supervisores", "Agentes"];
+
+  return [...extensions].sort((a, b) => {
+    const areaA = a.area ?? "";
+    const areaB = b.area ?? "";
+    const indexA = preferred.findIndex((area) => areaA.toLowerCase().includes(area.toLowerCase()));
+    const indexB = preferred.findIndex((area) => areaB.toLowerCase().includes(area.toLowerCase()));
+
+    if (indexA !== indexB) {
+      return (indexA === -1 ? 99 : indexA) - (indexB === -1 ? 99 : indexB);
+    }
+
+    return a.extension.localeCompare(b.extension);
+  });
 }
 
 function previewNetwork(ip: string, cidr: number) {
