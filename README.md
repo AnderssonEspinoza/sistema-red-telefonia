@@ -4,6 +4,14 @@ Sistema local de operaciones de ventas tipo call center sobre FreePBX/Asterisk. 
 
 El entorno se ejecuta completo con Docker Compose. No depende de una nube externa: Floci simula SQS/S3 localmente, Redis mantiene estado operativo de marcacion y MongoDB almacena transcripciones.
 
+El modo activo del laboratorio es:
+
+```text
+CALL_MODE=lab_internal
+```
+
+En este modo los leads son clientes simulados por softphone (`9001-9005`). No hay SIP trunk ni llamadas reales a PSTN.
+
 ## Arquitectura
 
 | Componente | Tecnologia | Funcion |
@@ -55,21 +63,25 @@ Servicios publicados al host:
 Dashboard:   http://localhost:5173
 Backend:     http://localhost:3000
 FreePBX:     http://localhost:8081
-Floci:       http://localhost:4566
-PostgreSQL:  localhost:5432
-Redis:       localhost:6379
-MongoDB:     localhost:27017
 ```
 
 Puertos de telefonia:
 
 ```text
 SIP/PJSIP: 5060/udp
-AMI:       5038/tcp
 RTP:       10000-10100/udp
+WebSocket: 8088/tcp
 ```
 
 Los microservicios Python (`dialer-service`, `transcription-service`, `metrics-service`) no se publican al host. El backend los consume dentro de la red Docker por HTTP interno.
+
+PostgreSQL, Redis, MongoDB, Floci y AMI quedan internos por defecto. Para depuracion local:
+
+```bash
+docker compose -f compose.yaml -f compose.dev-ports.yaml up -d
+```
+
+La segmentacion del laboratorio se documenta en [VLANs, subredes y firewall](docs/VLAN_FIREWALL.md). El proyecto separa contenedores por redes Docker y deja un script nftables para aplicar reglas entre Empresa, Clientes y PBX cuando existan VLANs o subredes reales.
 
 ## FreePBX y softphones
 
@@ -83,8 +95,18 @@ Preparacion inicial:
 Extensiones de prueba:
 
 ```text
-1001 / Telefonia1001
-1002 / Telefonia1002
+1001 Soporte / Telefonia1001
+1002 Agente / Telefonia1002
+1003 Soporte 2 / Telefonia1003
+1004 Agente / Telefonia1004
+2001 Marketing / Telefonia2001
+3001 Ventas / Telefonia3001
+4001 Supervisor / Telefonia4001
+9001 Cliente Carlos / Telefonia9001
+9002 Cliente Maria / Telefonia9002
+9003 Cliente Empresa Demo / Telefonia9003
+9004 Cliente Reclamo / Telefonia9004
+9005 Cliente Interesado / Telefonia9005
 ```
 
 Configuracion del softphone:
@@ -107,10 +129,11 @@ Si la llamada timbra pero no hay audio:
 1. Iniciar sesion en el dashboard.
 2. Registrar los softphones `1001` y `1002` contra FreePBX.
 3. Usar `Marcar lead` o `Marcar siguiente lead` para que el marcador Python origine una llamada por AMI.
-4. Contestar en el agente `1001`; Asterisk continua el flujo hacia el lead `1002`.
-5. Cortar la llamada y revisar tabla de llamadas, CDR, evidencias y grabaciones.
-6. Usar `Analizar texto demo` para validar MongoDB, deteccion de oportunidad y enmascaramiento de tarjeta.
-7. Probar fallas controladas en proveedores desde `Circuit breaker - proveedores`.
+4. Contestar en el agente `1001`; Asterisk continua el flujo hacia un cliente simulado `9001-9005`.
+5. Probar el IVR llamando desde `9001` a `5000` y presionando `1` para soporte.
+6. Cortar la llamada y revisar tabla de llamadas, CDR, evidencias y grabaciones.
+7. Usar `Analizar texto demo` para validar MongoDB, deteccion de oportunidad y enmascaramiento de tarjeta.
+8. Probar fallas controladas en proveedores desde `Circuit breaker - proveedores`.
 
 El boton `Registrar llamada demo` solo crea datos controlados para pruebas sin softphones. La marcacion de leads usa AMI contra Asterisk.
 
@@ -180,3 +203,7 @@ docs/           Documentacion complementaria
 
 - [Instalacion local](docs/INSTALL.md)
 - [Guion de demostracion](docs/DEMO.md)
+- [Arquitectura](docs/ARCHITECTURE.md)
+- [VLANs, subredes y firewall](docs/VLAN_FIREWALL.md)
+- [Pruebas remotas con Tailscale](docs/TAILSCALE.md)
+- [Preparacion futura para SIP trunk](docs/SIP_TRUNK_READY.md)

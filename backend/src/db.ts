@@ -460,6 +460,10 @@ export async function upsertAmiLlamada(input: AmiLlamadaInput): Promise<Llamada>
       llamada = inserted.rows[0];
     }
 
+    if (isTerminal) {
+      await closeRelatedAmiCalls(client, llamada, input.amiLinkedId ?? input.amiUniqueId ?? null, input.amiUniqueId ?? null);
+    }
+
     await insertLlamadaEvento(client, llamada.id, input.eventType, estado, input.rawEvent ?? null);
     await client.query("COMMIT");
     return llamada;
@@ -469,6 +473,32 @@ export async function upsertAmiLlamada(input: AmiLlamadaInput): Promise<Llamada>
   } finally {
     client.release();
   }
+}
+
+async function closeRelatedAmiCalls(client: pg.PoolClient, llamada: Llamada, linkedId: string | null, uniqueId: string | null) {
+  if (!linkedId && !uniqueId) {
+    return;
+  }
+
+  await client.query(
+    `UPDATE llamadas
+     SET
+       estado = 'HANGUP',
+       ultimo_evento = COALESCE(ultimo_evento, 'Hangup'),
+       fecha_fin = COALESCE(fecha_fin, CURRENT_TIMESTAMP),
+       duracion_segundos = COALESCE(
+         duracion_segundos,
+         GREATEST(0, EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - fecha_inicio))::INTEGER)
+       )
+     WHERE id <> $1
+       AND fecha_fin IS NULL
+       AND fuente = 'ami'
+       AND (
+         ($2::VARCHAR IS NOT NULL AND (ami_linkedid = $2 OR ami_uniqueid = $2))
+         OR ($3::VARCHAR IS NOT NULL AND (ami_linkedid = $3 OR ami_uniqueid = $3))
+       )`,
+    [llamada.id, linkedId, uniqueId]
+  );
 }
 
 export async function setLlamadaEvidence(id: number, evidenceKey: string): Promise<Llamada | null> {

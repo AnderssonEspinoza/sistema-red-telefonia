@@ -5,6 +5,7 @@ const dialerUrl = process.env.DIALER_SERVICE_URL ?? "http://dialer-service:7010"
 const transcriptionUrl = process.env.TRANSCRIPTION_SERVICE_URL ?? "http://transcription-service:7020";
 const metricsUrl = process.env.METRICS_SERVICE_URL ?? "http://metrics-service:7030";
 const defaultAgentExtension = process.env.DEFAULT_AGENT_EXTENSION ?? "1001";
+const callMode = process.env.CALL_MODE ?? "lab_internal";
 
 const dialerCircuit = new CircuitBreaker("dialer", 3, 15000);
 const transcriptionCircuit = new CircuitBreaker("transcription", 3, 15000);
@@ -25,6 +26,11 @@ export function callCenterConfig() {
     transcriptionUrl,
     metricsUrl,
     defaultAgentExtension,
+    callMode,
+    labModeNote:
+      callMode === "lab_internal"
+        ? "Modo laboratorio: clientes simulados por softphone 9001-9005, sin PSTN ni SIP trunk real."
+        : "Modo reservado para preparacion futura; no conecta un proveedor SIP real.",
     stateStore: "Redis",
     transcriptStore: "MongoDB",
     asteriskControl: "Python AGI + AMI Originate",

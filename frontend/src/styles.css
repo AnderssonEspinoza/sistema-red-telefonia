@@ -384,7 +384,9 @@ button:disabled {
 
 .app-frame.view-proveedores #proveedores,
 .app-frame.view-extensiones #extensiones,
+.app-frame.view-extensiones #usuario-form,
 .app-frame.view-clientes #clientes,
+.app-frame.view-clientes #usuario-form,
 .app-frame.view-callcenter #callcenter,
 .app-frame.view-llamadas #llamadas,
 .app-frame.view-usuarios #usuarios,
@@ -436,6 +438,37 @@ button:disabled {
   color: #69717a;
   font-size: 13px;
   text-align: right;
+}
+
+.incoming-call-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-start;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid #d3441f;
+  border-radius: 7px;
+  background: #fff4ee;
+  color: #25303b;
+}
+
+.incoming-call-banner div {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
+.incoming-call-banner strong,
+.incoming-call-banner span {
+  overflow-wrap: anywhere;
+}
+
+.incoming-call-banner span {
+  color: #6f5b51;
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .main-column {
@@ -644,6 +677,82 @@ td span {
   display: grid;
 }
 
+.webphone-card {
+  display: grid;
+  gap: 12px;
+  margin: 0 16px;
+  border: 1px solid #e3ded7;
+  border-radius: 7px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.webphone-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 16px;
+}
+
+.webphone-grid label,
+.webphone-hint {
+  display: grid;
+  gap: 5px;
+  color: #5f6872;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.webphone-grid input {
+  min-height: 38px;
+  border: 1px solid #d9d2ca;
+  border-radius: 6px;
+  background: #fbfaf8;
+  color: #25303b;
+  padding: 0 10px;
+}
+
+.webphone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 0 16px;
+}
+
+.webphone-hint {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0 16px 16px;
+}
+
+.webphone-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 16px;
+}
+
+.webphone-preview {
+  display: grid;
+  gap: 8px;
+}
+
+.webphone-preview strong {
+  color: #25303b;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.webphone-preview video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid #d9d2ca;
+  border-radius: 6px;
+  background: #11161a;
+  object-fit: cover;
+}
+
 .quick-dial-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -828,6 +937,13 @@ code {
   overflow-wrap: anywhere;
 }
 
+.next-lead-box small,
+.section-help {
+  color: #7a838c;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .callcenter-message {
   padding: 0 16px 16px;
 }
@@ -850,13 +966,18 @@ code {
 .lead-list h3,
 .transcript-list h3 {
   margin: 0;
-  padding: 13px 16px;
-  border-bottom: 1px solid #e6e1db;
+  padding: 13px 16px 4px;
   color: #25303b;
   font-size: 12px;
   font-weight: 950;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+
+.section-help {
+  margin: 0;
+  padding: 0 16px 12px;
+  border-bottom: 1px solid #e6e1db;
 }
 
 .lead-row,
@@ -1252,6 +1373,12 @@ td {
   }
 
   .manual-dial-box {
+    grid-template-columns: 1fr;
+  }
+
+  .webphone-grid,
+  .webphone-preview-grid,
+  .webphone-hint {
     grid-template-columns: 1fr;
   }
 

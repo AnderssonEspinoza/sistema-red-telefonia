@@ -332,6 +332,7 @@ async function processFrame(frame: string, handler: AmiHandler) {
       extractExtension(parsed.DestCallerIDNum) ??
       extractExtension(parsed.DestChannel) ??
       extractExtension(parsed.Destination) ??
+      extractExtension(parsed.Exten) ??
       extractExtension(parsed.DialString),
     uniqueId: parsed.Uniqueid ?? parsed.DestUniqueid ?? null,
     linkedId: parsed.Linkedid ?? parsed.DestLinkedid ?? parsed.Uniqueid ?? null,

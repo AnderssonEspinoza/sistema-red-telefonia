@@ -16,8 +16,11 @@ include "/etc/freepbx.conf";
 
 $core = FreePBX::Core();
 $extensions = [
-    ['ext' => '1001', 'name' => 'Soporte - Juan Perez', 'secret' => 'Telefonia1001'],
+    ['ext' => '1001', 'name' => 'Andersson Espinoza', 'secret' => 'Telefonia1001'],
     ['ext' => '1002', 'name' => 'Agente - Maria Lopez', 'secret' => 'Telefonia1002'],
+    ['ext' => '1003', 'name' => 'Soporte 2 - Luis Torres', 'secret' => 'Telefonia1003'],
+    ['ext' => '1004', 'name' => 'Agente - Sofia Ramos', 'secret' => 'Telefonia1004'],
+    ['ext' => '1099', 'name' => 'Operador Web', 'secret' => 'Telefonia1099'],
     ['ext' => '2001', 'name' => 'Marketing - Campanas', 'secret' => 'Telefonia2001'],
     ['ext' => '3001', 'name' => 'Ventas - Asesor', 'secret' => 'Telefonia3001'],
     ['ext' => '4001', 'name' => 'Supervisor - Call Center', 'secret' => 'Telefonia4001'],
@@ -56,7 +59,7 @@ foreach ($extensions as $item) {
         'secret' => $item['secret'],
         'outboundcid' => '',
         'password' => '',
-        'max_contacts' => 2,
+        'max_contacts' => $item['ext'] === '1099' ? 1 : 2,
         'vm' => 'no',
         'vmpwd' => '',
         'email' => '',
@@ -93,17 +96,84 @@ function applyRecordingSettings(string $extension): void
     }
 }
 
-$settings = [
-    'direct_media' => 'no',
-    'rtp_symmetric' => 'yes',
-    'force_rport' => 'yes',
-    'rewrite_contact' => 'yes',
-    'media_encryption' => 'no',
-];
 $db = FreePBX::Database();
-foreach ($settings as $keyword => $value) {
-    $stmt = $db->prepare("UPDATE sip SET data = ? WHERE keyword = ?");
-    $stmt->execute([$value, $keyword]);
+applyNatAudioSettingsForAllExtensions($db);
+applyLabContexts($db);
+applyWebrtcSettings($db, '1099');
+
+function upsertSipSetting(PDO $db, string $extension, string $keyword, string $value): void
+{
+    $stmt = $db->prepare(
+        "INSERT INTO sip (id, keyword, data, flags) VALUES (?, ?, ?, 0)
+         ON DUPLICATE KEY UPDATE data = VALUES(data)"
+    );
+    $stmt->execute([$extension, $keyword, $value]);
+}
+
+function applyNatAudioSettingsForAllExtensions(PDO $db): void
+{
+    $settings = [
+        'allow' => 'ulaw,alaw,gsm,g726,g722,h264,vp8',
+        'direct_media' => 'no',
+        'rtp_symmetric' => 'yes',
+        'force_rport' => 'yes',
+        'rewrite_contact' => 'yes',
+        'media_encryption' => 'no',
+        'qualify_frequency' => '0',
+        'qualifyfreq' => '0',
+    ];
+
+    foreach ($settings as $keyword => $value) {
+        $stmt = $db->prepare("UPDATE sip SET data = ? WHERE keyword = ?");
+        $stmt->execute([$value, $keyword]);
+    }
+}
+
+function applyLabContexts(PDO $db): void
+{
+    $enterprise = ['1001', '1002', '1003', '1004', '1099', '2001', '3001', '4001'];
+    $clients = ['9001', '9002', '9003', '9004', '9005'];
+
+    foreach ($enterprise as $extension) {
+        upsertSipSetting($db, $extension, 'context', 'lab-enterprise');
+    }
+
+    foreach ($clients as $extension) {
+        upsertSipSetting($db, $extension, 'context', 'lab-clients');
+    }
+}
+
+function applyWebrtcSettings(PDO $db, string $extension): void
+{
+    $settings = [
+        'allow' => 'ulaw,alaw,gsm,g726,g722,h264,vp8',
+        'transport' => '0.0.0.0-ws',
+        'webrtc' => 'yes',
+        'media_encryption' => 'dtls',
+        'dtls_auto_generate_cert' => 'yes',
+        'dtls_setup' => 'actpass',
+        'avpf' => 'yes',
+        'use_avpf' => 'yes',
+        'force_avp' => 'yes',
+        'ice_support' => 'yes',
+        'icesupport' => 'yes',
+        'bundle' => 'yes',
+        'rtcp_mux' => 'yes',
+        'media_use_received_transport' => 'yes',
+        'direct_media' => 'no',
+        'rtp_symmetric' => 'yes',
+        'force_rport' => 'yes',
+        'rewrite_contact' => 'yes',
+        'max_contacts' => '1',
+        'remove_existing' => 'yes',
+        'remove_unavailable' => 'yes',
+        'qualify_frequency' => '0',
+        'qualifyfreq' => '0',
+    ];
+
+    foreach ($settings as $keyword => $value) {
+        upsertSipSetting($db, $extension, $keyword, $value);
+    }
 }
 PHP
 

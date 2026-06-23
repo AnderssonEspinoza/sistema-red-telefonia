@@ -16,6 +16,17 @@ if [[ -z "$LAN_IP" || -z "$LAN_NET" || -z "$LAN_CIDR" || "$LAN_NET" == "$LAN_CID
   exit 1
 fi
 
+cat > freepbx/pjsip.transports_custom.conf <<EOF
+[0.0.0.0-ws]
+type=transport
+protocol=ws
+bind=0.0.0.0:8088
+allow_reload=yes
+external_media_address=${LAN_IP}
+external_signaling_address=${LAN_IP}
+local_net=${LAN_NET}/${LAN_CIDR}
+EOF
+
 docker compose up -d freepbx
 
 wait_for_asterisk() {

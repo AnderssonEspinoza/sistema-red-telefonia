@@ -5,20 +5,14 @@
 - Dashboard: http://localhost:5173
 - Backend API: http://localhost:3000/api/health
 - FreePBX: http://localhost:8081
-- Floci AWS local: http://localhost:4566
-- PostgreSQL: localhost:5432
-- Redis: localhost:6379
-- MongoDB: localhost:27017
 
-Si algun puerto ya esta ocupado, cambia el valor correspondiente en `.env`. Por ejemplo:
+PostgreSQL, Redis, MongoDB, Floci y AMI quedan internos por defecto. Para publicarlos al host en desarrollo:
 
-```text
-POSTGRES_PORT=5433
-REDIS_PORT=6380
-MONGO_PORT=27018
+```bash
+docker compose -f compose.yaml -f compose.dev-ports.yaml up -d
 ```
 
-El cambio solo afecta el puerto publicado al host. Dentro de Docker los servicios siguen comunicandose por nombre: `postgres:5432`, `redis:6379` y `mongo:27017`.
+Si algun puerto de datos ya esta ocupado, cambia el valor correspondiente en `.env`: `POSTGRES_PORT`, `REDIS_PORT`, `MONGO_PORT`, `FLOCI_PORT` o `AMI_HOST_PORT`.
 
 ## Arranque
 
@@ -48,6 +42,7 @@ AMI_USERNAME=telefonia
 AMI_SECRET=telefonia_ami_dev
 DEFAULT_AGENT_EXTENSION=1001
 MAX_ACTIVE_DIALS=4
+CALL_MODE=lab_internal
 ```
 
 Para una entrega formal cambia las claves y recrea los servicios:
@@ -66,8 +61,21 @@ docker compose up -d --build --force-recreate backend freepbx dialer-service
 Extensiones creadas:
 
 ```text
-1001 / Telefonia1001
-1002 / Telefonia1002
+Red Empresa:
+1001 Soporte / Telefonia1001
+1002 Agente / Telefonia1002
+1003 Soporte 2 / Telefonia1003
+1004 Agente / Telefonia1004
+2001 Marketing / Telefonia2001
+3001 Ventas / Telefonia3001
+4001 Supervisor / Telefonia4001
+
+Red Clientes Simulados:
+9001 Cliente Carlos / Telefonia9001
+9002 Cliente Maria / Telefonia9002
+9003 Cliente Empresa Demo / Telefonia9003
+9004 Cliente Reclamo / Telefonia9004
+9005 Cliente Interesado / Telefonia9005
 ```
 
 El dashboard tambien puede crear extensiones adicionales. El backend llama al provisionador interno de FreePBX, crea el usuario PJSIP, activa grabacion y registra el usuario en PostgreSQL.
@@ -109,6 +117,14 @@ redis:6379                   Leads y estado realtime
 mongo:27017                  Transcripciones
 ```
 
+Modo de llamadas:
+
+```text
+CALL_MODE=lab_internal
+```
+
+En este modo los leads son `9001-9005`. El sistema no marca PSTN ni numeros externos reales.
+
 Flujo de marcacion:
 
 1. El dashboard llama `POST /api/call-center/dial-next`.
@@ -118,6 +134,20 @@ Flujo de marcacion:
 5. AMI ejecuta `Originate` sobre `PJSIP/1001`.
 6. Cuando el agente contesta, Asterisk entra al contexto `sales-campaign` y marca el lead.
 7. El AGI `sales_quality_agi.py` queda disponible como punto de analisis dentro del dialplan.
+
+Flujo inbound de clientes:
+
+1. El cliente simulado `9001` llama a `5000`.
+2. Entra al IVR principal.
+3. Presiona `1` para soporte.
+4. Asterisk timbra `1001`, `1002` y `1003`.
+5. La llamada queda en AMI/CDR/grabaciones.
+
+Reglas:
+
+- Empresa puede llamar a clientes `9001-9005`.
+- Clientes pueden llamar al IVR `5000`.
+- Clientes no pueden llamar directo al supervisor `4001`.
 
 El contexto custom esta en:
 
@@ -138,10 +168,11 @@ docker compose exec freepbx fwconsole reload
 - AMI con usuario dedicado.
 - Provisionador FreePBX protegido por token.
 - Microservicios no publicados al host.
+- AMI, PostgreSQL, Redis, MongoDB y Floci no publicados al host por defecto.
 - Redis/Mongo usados para datos operativos del call center.
 - Transcripcion visible con PAN de tarjetas enmascarado.
 - Texto original cifrado antes de guardarse en MongoDB.
-- Diseño documentado para separar voz, aplicacion y datos en VLANs en una red real.
+- Diseño documentado para separar voz, aplicacion y datos en VLANs en una red real: `docs/VLAN_FIREWALL.md`.
 
 ## Endpoints utiles
 

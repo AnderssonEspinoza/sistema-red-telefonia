@@ -2,7 +2,7 @@ import "dotenv/config";
 import http from "node:http";
 import cors from "cors";
 import express from "express";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { z } from "zod";
 import { checkAmi, getExtensionStatuses, originateExtensionCall, setAmiCircuitDemo, startAmiListener } from "./ami.js";
 import { authConfig, login, requireAuth, verifyToken } from "./auth.js";
@@ -66,15 +66,140 @@ import {
 import { enrichRecordings, recordingConfig, resolveRecordingFile } from "./recordings.js";
 
 const port = Number(process.env.PORT ?? 3000);
-const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
 const hostNetworkAgentUrl = process.env.HOST_NETWORK_AGENT_URL ?? "http://host.docker.internal:7040";
+const sipProxyTarget = process.env.SIP_WS_PROXY_TARGET ?? "ws://freepbx:8088/ws";
 const dbCircuit = new CircuitBreaker("postgres", 2, 15000);
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ noServer: true });
+const dashboardClients = new Set<WebSocket>();
 
-app.use(cors({ origin: frontendOrigin }));
+server.on("upgrade", (request, socket, head) => {
+  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+  if (url.pathname === "/sip-ws") {
+    wss.handleUpgrade(request, socket, head, (client) => {
+      const upstream = new WebSocket(sipProxyTarget, "sip");
+      const pendingClientMessages: Array<{ message: RawData; isBinary: boolean }> = [];
+
+      const closePair = (code = 1011, reason = "sip proxy closed") => {
+        if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
+          client.close(code, reason);
+        }
+
+        if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
+          upstream.close();
+        }
+      };
+
+      client.on("message", (message, isBinary) => {
+        logSipProxyFrame("client", message);
+
+        if (upstream.readyState === WebSocket.OPEN) {
+          upstream.send(rawDataToString(message), { binary: false });
+          return;
+        }
+
+        if (upstream.readyState === WebSocket.CONNECTING) {
+          pendingClientMessages.push({ message, isBinary: false });
+        }
+      });
+
+      upstream.on("open", () => {
+        for (const { message, isBinary } of pendingClientMessages.splice(0)) {
+          if (upstream.readyState === WebSocket.OPEN) {
+            upstream.send(rawDataToString(message), { binary: isBinary });
+          }
+        }
+      });
+
+      upstream.on("message", (message, isBinary) => {
+        logSipProxyFrame("upstream", message);
+        notifyRemoteSipBye(message);
+
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(rawDataToString(message), { binary: false });
+        }
+      });
+
+      upstream.on("error", (error) => {
+        console.warn(`sip-ws upstream error: ${error.message}`);
+        closePair();
+      });
+      client.on("error", (error) => {
+        console.warn(`sip-ws client error: ${error.message}`);
+        closePair();
+      });
+      upstream.on("close", () => closePair());
+      client.on("close", () => closePair());
+    });
+
+    return;
+  }
+
+  wss.handleUpgrade(request, socket, head, (client) => {
+    wss.emit("connection", client, request);
+  });
+});
+
+function logSipProxyFrame(direction: "client" | "upstream", message: RawData) {
+  const text = rawDataToString(message);
+
+  if (!text) {
+    return;
+  }
+
+  const firstLine = text.split("\r\n", 1)[0] ?? "";
+
+  if (/^(REGISTER|OPTIONS|INVITE|CANCEL|BYE|ACK|SIP\/2\.0)/i.test(firstLine)) {
+    console.log(`sip-ws ${direction}: ${firstLine}`);
+  }
+}
+
+function notifyRemoteSipBye(message: RawData) {
+  const text = rawDataToString(message);
+  const firstLine = text.split("\r\n", 1)[0] ?? "";
+
+  if (!/^BYE\s+/i.test(firstLine)) {
+    return;
+  }
+
+  const extension = extractSipRequestExtension(firstLine) ?? extractSipHeaderExtension(text, "To");
+
+  if (!extension) {
+    return;
+  }
+
+  broadcast("WEBPHONE_REMOTE_HANGUP", { extension });
+}
+
+function extractSipRequestExtension(firstLine: string) {
+  return firstLine.match(/^BYE\s+sip:(\d{2,10})@/i)?.[1] ?? null;
+}
+
+function extractSipHeaderExtension(text: string, header: string) {
+  const pattern = new RegExp(`^${header}:.*sip:(\\d{2,10})@`, "im");
+  return text.match(pattern)?.[1] ?? null;
+}
+
+function rawDataToString(message: RawData) {
+  if (typeof message === "string") {
+    return message;
+  }
+
+  if (Buffer.isBuffer(message)) {
+    return message.toString("utf8");
+  }
+
+  if (Array.isArray(message)) {
+    return Buffer.concat(message).toString("utf8");
+  }
+
+  return Buffer.from(message).toString("utf8");
+}
+
+app.use(cors({ origin: true }));
 app.use(express.json());
 app.use(requestMetrics);
 
@@ -151,6 +276,10 @@ wss.on("connection", (client, request) => {
     return;
   }
 
+  dashboardClients.add(client);
+  client.on("close", () => {
+    dashboardClients.delete(client);
+  });
   client.send(JSON.stringify({ type: "CONNECTED", at: new Date().toISOString() }));
 });
 
@@ -740,7 +869,7 @@ async function publishCallSnapshot(llamada: Llamada) {
 function broadcast(type: string, payload: unknown) {
   const message = JSON.stringify({ type, payload, at: new Date().toISOString() });
 
-  for (const client of wss.clients) {
+  for (const client of dashboardClients) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
@@ -841,8 +970,9 @@ async function buildDemoReport() {
         : "Credenciales personalizadas configuradas."
     },
     recommendations: [
-      "Registrar softphones 1001 y 1002 antes de probar marcacion real.",
-      "Usar Marcar lead para demostrar AMI Originate y Analizar texto demo para MongoDB/enmascaramiento.",
+      "Registrar 1001/1002 como agentes y 9001 como cliente simulado antes de probar llamadas reales.",
+      "Probar 9001 -> 5000 -> opcion 1 para demostrar IVR y cola de soporte.",
+      "Usar Marcar lead para demostrar AMI Originate hacia clientes 9001-9005 y Analizar texto demo para MongoDB/enmascaramiento.",
       "Mostrar /api/demo/report o scripts/demo-report.sh como evidencia final.",
       "Mantener FreePBX, backend, PostgreSQL, Redis, MongoDB, Floci, microservicios y frontend activos antes de iniciar la demo."
     ]

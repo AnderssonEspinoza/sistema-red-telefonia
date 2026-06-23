@@ -1,4 +1,5 @@
-import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, type RefObject, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Invitation, Inviter, Registerer, SessionState, UserAgent } from "sip.js";
 import {
   Activity,
   AlertTriangle,
@@ -32,8 +33,9 @@ import {
   X
 } from "lucide-react";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
-const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3000";
+const browserHost = window.location.hostname || "localhost";
+const API_URL = import.meta.env.VITE_API_URL ?? `http://${browserHost}:3000`;
+const WS_URL = import.meta.env.VITE_WS_URL ?? `ws://${browserHost}:3000`;
 
 type DemoSupplier = "postgres" | "ami" | "floci-sqs" | "floci-s3" | "dialer" | "transcription" | "metrics";
 
@@ -361,6 +363,23 @@ interface LoginForm {
   password: string;
 }
 
+interface WebphoneConfig {
+  extension: string;
+  password: string;
+  server: string;
+  aorHost: string;
+}
+
+type WebphoneCallMode = "audio" | "video";
+type WebphoneSessionDirection = "idle" | "incoming" | "outgoing";
+type WebphoneSession = Invitation | Inviter;
+
+interface WebphoneRuntime {
+  userAgent: UserAgent;
+  registerer: Registerer;
+  session: WebphoneSession | null;
+}
+
 const emptyForm: UsuarioForm = {
   nombre: "",
   extension: "",
@@ -379,6 +398,7 @@ const emptyManualDialForm: ManualDialForm = {
   client: ""
 };
 const activeCallMaxAgeMs = 8 * 60 * 60 * 1000;
+const webphoneSignalMaxAgeMs = 90 * 1000;
 const tokenStorageKey = "telefonia_auth_token";
 const tablePageSize = 15;
 
@@ -408,22 +428,56 @@ export function App() {
   const [analyzingText, setAnalyzingText] = useState(false);
   const [callCenterNotice, setCallCenterNotice] = useState<string | null>(null);
   const [callCenterError, setCallCenterError] = useState<string | null>(null);
-  const [directCallOrigin, setDirectCallOrigin] = useState("1001");
+  const [directCallOrigin, setDirectCallOrigin] = useState("1099");
   const [manualDial, setManualDial] = useState<ManualDialForm>(emptyManualDialForm);
   const [callingTarget, setCallingTarget] = useState<string | null>(null);
   const [togglingSupplier, setTogglingSupplier] = useState<DemoSupplier | null>(null);
   const [page, setPage] = useState(1);
   const [activeNav, setActiveNav] = useState("resumen");
+  const [webphoneConfig, setWebphoneConfig] = useState<WebphoneConfig>(() => buildDefaultWebphoneConfig());
+  const [webphoneStatus, setWebphoneStatus] = useState("DESCONECTADO");
+  const [webphoneRegistered, setWebphoneRegistered] = useState(false);
+  const [webphoneInCall, setWebphoneInCall] = useState(false);
+  const [webphoneIncoming, setWebphoneIncoming] = useState(false);
+  const [webphoneCanAnswer, setWebphoneCanAnswer] = useState(false);
+  const [webphoneBusy, setWebphoneBusy] = useState(false);
+  const [webphoneNotice, setWebphoneNotice] = useState<string | null>(null);
+  const [webphoneError, setWebphoneError] = useState<string | null>(null);
+  const [webphoneCallMode, setWebphoneCallMode] = useState<WebphoneCallMode>("audio");
+  const webphoneRef = useRef<WebphoneRuntime | null>(null);
+  const outgoingWebphoneCallRef = useRef(false);
+  const webphoneSessionDirectionRef = useRef<WebphoneSessionDirection>("idle");
+  const webphoneSessionPollRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
+  const webphoneLastSessionStateRef = useRef<string | null>(null);
+  const webphoneExpectedInviteTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const localMediaStreamRef = useRef<MediaStream | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const activeCalls = useMemo(
     () =>
       llamadas.filter(
         (call) =>
           !call.fecha_fin &&
+          !hasTerminalSibling(call, llamadas) &&
           Date.now() - new Date(call.fecha_inicio).getTime() < activeCallMaxAgeMs &&
           ["RINGING", "ANSWERED", "NEWCHANNEL"].includes(call.estado)
       ),
     [llamadas]
+  );
+  const recentWebphoneSignalCalls = useMemo(
+    () =>
+      activeCalls.filter((call) => Date.now() - new Date(call.fecha_inicio).getTime() < webphoneSignalMaxAgeMs),
+    [activeCalls]
+  );
+  const activeWebphoneIncomingCall = useMemo(
+    () => recentWebphoneSignalCalls.find((call) => isIncomingCallForExtension(call, webphoneConfig.extension)) ?? null,
+    [recentWebphoneSignalCalls, webphoneConfig.extension]
+  );
+  const activeWebphoneCall = useMemo(
+    () => activeCalls.find((call) => isCallForExtension(call, webphoneConfig.extension)) ?? null,
+    [activeCalls, webphoneConfig.extension]
   );
 
   const totalPages = Math.max(1, Math.ceil(llamadas.length / tablePageSize));
@@ -542,6 +596,16 @@ export function App() {
         if (event.type === "USER_UPDATED") {
           setUsuarios((current) => upsertById(current, event.payload).sort(byExtension));
         }
+
+        if (event.type === "WEBPHONE_REMOTE_HANGUP" && event.payload?.extension === webphoneConfig.extension) {
+          const runtime = webphoneRef.current;
+
+          if (runtime?.session) {
+            runtime.session = null;
+          }
+
+          finishWebphoneCall("Llamada finalizada por la otra extension.");
+        }
       };
     };
 
@@ -552,11 +616,73 @@ export function App() {
       window.clearTimeout(retry);
       socket?.close();
     };
-  }, [authConfigState?.enabled, isAuthorized, token]);
+  }, [authConfigState?.enabled, isAuthorized, token, webphoneConfig.extension]);
 
   useEffect(() => {
     setPage((current) => Math.min(current, totalPages));
   }, [totalPages]);
+
+  useEffect(() => {
+    if (
+      !webphoneRegistered ||
+      webphoneInCall ||
+      outgoingWebphoneCallRef.current ||
+      webphoneRef.current?.session ||
+      !activeWebphoneIncomingCall
+    ) {
+      return;
+    }
+
+    webphoneSessionDirectionRef.current = "incoming";
+    setActiveNav("extensiones");
+    setWebphoneIncoming(true);
+    setWebphoneCanAnswer(false);
+    setWebphoneStatus("ENTRANTE");
+    setWebphoneNotice(
+      `Asterisk detecto una llamada de ${activeWebphoneIncomingCall.nombre_origen ?? activeWebphoneIncomingCall.extension_origen ?? "extension externa"} hacia ${webphoneConfig.extension}. Esperando la invitacion SIP del navegador.`
+    );
+  }, [activeWebphoneIncomingCall, webphoneConfig.extension, webphoneInCall, webphoneRegistered]);
+
+  useEffect(() => {
+    if (!webphoneRegistered) {
+      clearExpectedInviteTimer();
+      return;
+    }
+
+    const runtime = webphoneRef.current;
+    const hasSipSession = Boolean(runtime?.session);
+
+    if (activeWebphoneIncomingCall && !hasSipSession && !webphoneExpectedInviteTimerRef.current) {
+      webphoneExpectedInviteTimerRef.current = window.setTimeout(() => {
+        webphoneExpectedInviteTimerRef.current = null;
+
+        if (webphoneRef.current?.session || !activeWebphoneIncomingCall) {
+          return;
+        }
+
+        setWebphoneIncoming(false);
+        setWebphoneCanAnswer(false);
+        setWebphoneStatus("REGISTRADO");
+        setWebphoneNotice("La llamada llego a Asterisk, pero el navegador no recibio el INVITE SIP. Reconecta el telefono web 1099 y vuelve a llamar.");
+      }, 7000);
+      return;
+    }
+
+    if (hasSipSession || !activeWebphoneIncomingCall) {
+      clearExpectedInviteTimer();
+    }
+  }, [activeWebphoneIncomingCall, webphoneRegistered]);
+
+  useEffect(() => {
+    const runtime = webphoneRef.current;
+
+    if (!webphoneRegistered || !runtime?.session || activeWebphoneCall) {
+      return;
+    }
+
+    runtime.session = null;
+    finishWebphoneCall("Llamada finalizada por la otra extension.");
+  }, [activeWebphoneCall, webphoneRegistered]);
 
   useEffect(() => {
     const externip = health?.provisioner.network?.externip;
@@ -565,6 +691,28 @@ export function App() {
       setNetworkForm((current) => ({ ...current, lanIp: externip }));
     }
   }, [health?.provisioner.network?.externip, networkForm.lanIp]);
+
+  useEffect(() => {
+    setWebphoneConfig((current) => normalizeWebphoneConfig(current));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const webphone = webphoneRef.current;
+      webphoneRef.current = null;
+
+      if (webphone) {
+        if (webphone.session) {
+          void terminateWebphoneSession(webphone.session).catch(() => undefined);
+        }
+        void webphone.registerer.unregister().catch(() => undefined);
+        void webphone.userAgent.stop().catch(() => undefined);
+      }
+
+      stopWebphoneSessionMonitor();
+      stopLocalPreview();
+    };
+  }, []);
 
   async function submitUser(event: FormEvent) {
     event.preventDefault();
@@ -630,6 +778,12 @@ export function App() {
   }
 
   function startEditingUser(user: Usuario) {
+    if (isSimulatedClientExtension(user.extension)) {
+      setActiveNav("clientes");
+    } else {
+      setActiveNav("extensiones");
+    }
+
     setEditingExtension(user.extension);
     setForm({
       nombre: user.nombre,
@@ -638,6 +792,41 @@ export function App() {
       area: user.area ?? "",
       sipSecret: "",
       provisionFreepbx: false,
+      recordCalls: true
+    });
+    setFormNotice(null);
+    setFormError(null);
+    document.getElementById("usuario-form")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function startEditingExtension(extension: string) {
+    const user = usuarios.find((item) => item.extension === extension);
+
+    if (user) {
+      startEditingUser(user);
+    }
+  }
+
+  function startNewClient() {
+    setActiveNav("clientes");
+    const usedExtensions = new Set(usuarios.map((user) => user.extension));
+    let nextExtension = "9001";
+
+    for (let value = 9001; value <= 9999; value += 1) {
+      if (!usedExtensions.has(String(value))) {
+        nextExtension = String(value);
+        break;
+      }
+    }
+
+    setEditingExtension(null);
+    setForm({
+      nombre: "",
+      extension: nextExtension,
+      procedencia: "Red Clientes Simulados",
+      area: "Cliente",
+      sipSecret: `Telefonia${nextExtension}`,
+      provisionFreepbx: true,
       recordCalls: true
     });
     setFormNotice(null);
@@ -740,6 +929,51 @@ export function App() {
     setCallCenterError(null);
 
     try {
+      if (directCallOrigin === webphoneConfig.extension) {
+        const runtime = webphoneRef.current;
+
+        if (!runtime || !webphoneRegistered) {
+          throw new Error("Conecta primero el telefono web para usar la extension 1099");
+        }
+
+        const destinationUri = UserAgent.makeURI(`sip:${destination}@${webphoneConfig.aorHost}`);
+
+        if (!destinationUri) {
+          throw new Error("Destino SIP invalido");
+        }
+
+        setWebphoneCallMode(mode);
+        outgoingWebphoneCallRef.current = true;
+        webphoneSessionDirectionRef.current = "outgoing";
+        if (mode === "video") {
+          await startLocalPreview();
+        } else {
+          stopLocalPreview();
+        }
+        const inviter = new Inviter(runtime.userAgent, destinationUri, {
+          sessionDescriptionHandlerOptions: {
+            constraints: {
+              audio: true,
+              video: mode === "video"
+            }
+          }
+        });
+        runtime.session = inviter;
+        watchWebphoneSession(inviter, "outgoing");
+        await inviter.invite();
+        setWebphoneInCall(true);
+        setWebphoneIncoming(false);
+        setWebphoneCanAnswer(false);
+        setWebphoneStatus("LLAMANDO");
+        setWebphoneNotice(
+          `${mode === "video" ? "Videollamada" : "Llamada"} desde ${webphoneConfig.extension} a ${destination} iniciada en el navegador.`
+        );
+        setCallCenterNotice(
+          `${mode === "video" ? "Videollamada" : "Llamada"} ${webphoneConfig.extension} -> ${destination} iniciada desde la laptop.`
+        );
+        return;
+      }
+
       const response = await apiFetch("/api/calls/originate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -758,6 +992,8 @@ export function App() {
       setCallCenterNotice(`${mode === "video" ? "Video llamada" : "Llamada"} ${directCallOrigin} -> ${destination} enviada a Asterisk`);
       await loadData();
     } catch (error) {
+      outgoingWebphoneCallRef.current = false;
+      webphoneSessionDirectionRef.current = "idle";
       setCallCenterError(error instanceof Error ? error.message : "No se pudo originar llamada");
     } finally {
       setCallingTarget(null);
@@ -932,6 +1168,454 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
+  const companyExtensions = extensionStatuses.filter((extension) => !isSimulatedClientExtension(extension.extension));
+  const clientExtensions = extensionStatuses.filter((extension) => isSimulatedClientExtension(extension.extension));
+  const companyQuickDial = buildCompanyQuickDial(companyExtensions);
+  const clientQuickDial = clientExtensions;
+  const callCenterHealth = callCenter?.health ?? health?.callCenter ?? observability?.callCenter ?? null;
+  const networkPreview = previewNetwork(networkForm.lanIp, Number(networkForm.lanCidr));
+  const usingWebphoneOrigin = directCallOrigin === webphoneConfig.extension;
+
+  const statusCards = [
+    {
+      icon: <Database size={25} />,
+      title: "PostgreSQL",
+      state: health?.db.ok ? "OK" : "FALLA",
+      leftLabel: "Latency",
+      leftValue: `${Math.round(observability?.metrics.averageRequestMs ?? 0)} ms`,
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <RadioTower size={25} />,
+      title: "Asterisk AMI",
+      state: health?.ami.connected ? "OK" : "FALLA",
+      leftLabel: "Sesiones",
+      leftValue: health?.ami.connected ? "1" : "0",
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <Cloud size={25} />,
+      title: "Floci SQS",
+      state: health?.floci.sqs.ok ? "OK" : "FALLA",
+      leftLabel: "Eventos",
+      leftValue: observability?.metrics.callEvents ?? 0,
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <FileText size={25} />,
+      title: "Floci S3",
+      state: health?.floci.s3.ok ? "OK" : "FALLA",
+      leftLabel: "Objetos",
+      leftValue: observability?.callStats.withEvidence ?? 0,
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(health?.at)
+    },
+    {
+      icon: <BarChart3 size={25} />,
+      title: "Asterisk CDR",
+      state: health?.cdr.ok ? "OK" : "FALLA",
+      leftLabel: "Registros hoy",
+      leftValue: observability?.callStats.recentTotal ?? 0,
+      rightLabel: "Grabaciones",
+      rightValue: recordings.length
+    },
+    {
+      icon: <Server size={25} />,
+      title: "WebSocket",
+      state: socketState === "CONNECTED" ? "CONECTADO" : socketState,
+      leftLabel: "Sesiones",
+      leftValue: socketState === "CONNECTED" ? "1" : "0",
+      rightLabel: "Ultima verificacion",
+      rightValue: formatTime(observability?.at)
+    }
+  ];
+
+  function navigateToSection(sectionId: string) {
+    setActiveNav(sectionId);
+  }
+
+  async function connectWebphone() {
+    const config = normalizeWebphoneConfig(webphoneConfig);
+
+    if (config.server !== webphoneConfig.server || config.aorHost !== webphoneConfig.aorHost) {
+      setWebphoneConfig(config);
+    }
+
+    setWebphoneBusy(true);
+    setWebphoneError(null);
+    setWebphoneNotice(null);
+
+    try {
+      if (!remoteAudioRef.current || !localVideoRef.current || !remoteVideoRef.current) {
+        throw new Error("No se encontraron los elementos multimedia del navegador");
+      }
+
+      if (webphoneRef.current) {
+        await disconnectWebphone();
+      }
+
+      const uri = UserAgent.makeURI(`sip:${config.extension}@${config.aorHost}`);
+
+      if (!uri) {
+        throw new Error("Direccion SIP invalida para el telefono web");
+      }
+
+      const userAgent = new UserAgent({
+        uri,
+        authorizationUsername: config.extension,
+        authorizationPassword: config.password,
+        contactName: config.extension,
+        displayName: "Operador Web",
+        transportOptions: {
+          server: config.server,
+          connectionTimeout: 5,
+          keepAliveInterval: 20,
+          keepAliveDebounce: 5,
+          traceSip: true
+        },
+        delegate: {
+          onInvite: (invitation) => {
+            const runtime = webphoneRef.current;
+
+            if (!runtime) {
+              void invitation.reject().catch(() => undefined);
+              return;
+            }
+
+            runtime.session = invitation;
+            outgoingWebphoneCallRef.current = false;
+            webphoneSessionDirectionRef.current = "incoming";
+            setActiveNav("extensiones");
+            setWebphoneIncoming(true);
+            setWebphoneCanAnswer(true);
+            setWebphoneInCall(false);
+            setWebphoneStatus("ENTRANTE");
+            setWebphoneNotice(`Llamada entrante de ${invitation.remoteIdentity.displayName || invitation.remoteIdentity.uri.user || "extension externa"}.`);
+            watchWebphoneSession(invitation, "incoming");
+            void invitation.progress().catch(() => undefined);
+          },
+          onConnect: () => {
+            setWebphoneStatus("CONECTADO");
+          },
+          onDisconnect: (error?: Error) => {
+            outgoingWebphoneCallRef.current = false;
+            webphoneSessionDirectionRef.current = "idle";
+            setWebphoneRegistered(false);
+            setWebphoneInCall(false);
+            setWebphoneIncoming(false);
+            setWebphoneCanAnswer(false);
+            setWebphoneStatus("DESCONECTADO");
+
+            if (error) {
+              setWebphoneError(error.message);
+            }
+          }
+        }
+      });
+      const registerer = new Registerer(userAgent, {
+        expires: 120,
+        refreshFrequency: 75
+      });
+      const webphone: WebphoneRuntime = { userAgent, registerer, session: null };
+
+      registerer.stateChange.addListener((state) => {
+        if (state === "Registered") {
+          setWebphoneRegistered(true);
+          setWebphoneStatus("REGISTRADO");
+          setWebphoneNotice(`Telefono web ${config.extension} registrado.`);
+        }
+
+        if (state === "Unregistered" || state === "Terminated") {
+          outgoingWebphoneCallRef.current = false;
+          webphoneSessionDirectionRef.current = "idle";
+          setWebphoneRegistered(false);
+          setWebphoneInCall(false);
+          setWebphoneIncoming(false);
+          setWebphoneCanAnswer(false);
+          setWebphoneStatus("DESCONECTADO");
+        }
+      });
+
+      webphoneRef.current = webphone;
+      await userAgent.start();
+      await registerer.register();
+      setWebphoneRegistered(true);
+      setWebphoneStatus("REGISTRADO");
+      setWebphoneNotice(`Telefono web ${config.extension} registrado.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo conectar el telefono web";
+      setWebphoneError(message);
+      setWebphoneStatus("ERROR");
+    } finally {
+      setWebphoneBusy(false);
+    }
+  }
+
+  async function disconnectWebphone() {
+    const webphone = webphoneRef.current;
+    webphoneRef.current = null;
+    outgoingWebphoneCallRef.current = false;
+    webphoneSessionDirectionRef.current = "idle";
+    stopWebphoneSessionMonitor();
+    clearExpectedInviteTimer();
+
+    if (!webphone) {
+      setWebphoneRegistered(false);
+      setWebphoneInCall(false);
+      setWebphoneIncoming(false);
+      setWebphoneCanAnswer(false);
+      setWebphoneStatus("DESCONECTADO");
+      return;
+    }
+
+    setWebphoneBusy(true);
+    setWebphoneError(null);
+
+    try {
+      if (webphone.session) {
+        await terminateWebphoneSession(webphone.session).catch(() => undefined);
+        webphone.session = null;
+      }
+      await webphone.registerer.unregister().catch(() => undefined);
+      await webphone.userAgent.stop().catch(() => undefined);
+      stopLocalPreview();
+      outgoingWebphoneCallRef.current = false;
+      webphoneSessionDirectionRef.current = "idle";
+      setWebphoneRegistered(false);
+      setWebphoneInCall(false);
+      setWebphoneIncoming(false);
+      setWebphoneCanAnswer(false);
+      setWebphoneStatus("DESCONECTADO");
+      setWebphoneNotice("Telefono web desconectado.");
+    } catch (error) {
+      setWebphoneError(error instanceof Error ? error.message : "No se pudo desconectar el telefono web");
+    } finally {
+      setWebphoneBusy(false);
+    }
+  }
+
+  async function startLocalPreview() {
+    if (!localVideoRef.current) {
+      return;
+    }
+
+    stopLocalPreview();
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 360 },
+          facingMode: "user"
+        }
+      });
+
+      localMediaStreamRef.current = stream;
+      localVideoRef.current.srcObject = stream;
+      await localVideoRef.current.play().catch(() => undefined);
+    } catch (error) {
+      const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      localMediaStreamRef.current = audioOnly;
+      localVideoRef.current.srcObject = null;
+      setWebphoneNotice("Microfono activo. La camara no pudo abrirse en este navegador.");
+
+      if (error instanceof Error) {
+        setWebphoneError(error.message);
+      }
+    }
+  }
+
+  function stopLocalPreview() {
+    localMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localMediaStreamRef.current = null;
+
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+  }
+
+  function attachWebphoneSessionMedia(session: WebphoneSession) {
+    const handler = session.sessionDescriptionHandler as
+      | {
+          localMediaStream?: MediaStream;
+          remoteMediaStream?: MediaStream;
+        }
+      | undefined;
+
+    if (handler?.localMediaStream && localVideoRef.current) {
+      localVideoRef.current.srcObject = handler.localMediaStream;
+      void localVideoRef.current.play().catch(() => undefined);
+    }
+
+    if (handler?.remoteMediaStream && remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = handler.remoteMediaStream;
+      void remoteAudioRef.current.play().catch(() => undefined);
+    }
+
+    if (handler?.remoteMediaStream && remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = handler.remoteMediaStream;
+      void remoteVideoRef.current.play().catch(() => undefined);
+    }
+  }
+
+  async function terminateWebphoneSession(session: WebphoneSession) {
+    if (session.state === SessionState.Established) {
+      await session.bye();
+      return;
+    }
+
+    if (session instanceof Invitation) {
+      await session.reject().catch(() => session.dispose());
+      return;
+    }
+
+    if (session instanceof Inviter) {
+      await session.cancel().catch(() => session.dispose());
+      return;
+    }
+  }
+
+  function stopWebphoneSessionMonitor() {
+    if (webphoneSessionPollRef.current) {
+      window.clearInterval(webphoneSessionPollRef.current);
+      webphoneSessionPollRef.current = null;
+    }
+
+    webphoneLastSessionStateRef.current = null;
+  }
+
+  function watchWebphoneSession(session: WebphoneSession, direction: WebphoneSessionDirection) {
+    webphoneLastSessionStateRef.current = session.state;
+
+    session.stateChange.addListener((state) => {
+      const runtime = webphoneRef.current;
+
+      if (!runtime || runtime.session !== session) {
+        return;
+      }
+
+      webphoneLastSessionStateRef.current = state;
+
+      if (state === SessionState.Establishing) {
+        setWebphoneStatus(direction === "outgoing" ? "LLAMANDO" : "ENTRANTE");
+        return;
+      }
+
+      if (state === SessionState.Established) {
+        outgoingWebphoneCallRef.current = false;
+        setWebphoneIncoming(false);
+        setWebphoneCanAnswer(false);
+        setWebphoneInCall(true);
+        setWebphoneStatus("EN LLAMADA");
+        attachWebphoneSessionMedia(session);
+        return;
+      }
+
+      if (state === SessionState.Terminating || state === SessionState.Terminated) {
+        runtime.session = null;
+        finishWebphoneCall("Llamada finalizada.");
+      }
+    });
+  }
+
+  function clearExpectedInviteTimer() {
+    if (webphoneExpectedInviteTimerRef.current) {
+      window.clearTimeout(webphoneExpectedInviteTimerRef.current);
+      webphoneExpectedInviteTimerRef.current = null;
+    }
+  }
+
+  function finishWebphoneCall(message: string) {
+    outgoingWebphoneCallRef.current = false;
+    webphoneSessionDirectionRef.current = "idle";
+    clearExpectedInviteTimer();
+    stopLocalPreview();
+    setWebphoneIncoming(false);
+    setWebphoneCanAnswer(false);
+    setWebphoneInCall(false);
+    setWebphoneStatus(webphoneRef.current ? "REGISTRADO" : "CONECTADO");
+    setWebphoneNotice(message);
+  }
+
+  async function answerWebphoneCall() {
+    await answerWebphoneCallWithMode("audio");
+  }
+
+  async function answerWebphoneCallWithMode(mode: WebphoneCallMode) {
+    const runtime = webphoneRef.current;
+
+    if (!runtime) {
+      return;
+    }
+
+    setWebphoneBusy(true);
+    setWebphoneError(null);
+
+    try {
+      const invitation = runtime.session instanceof Invitation ? runtime.session : null;
+
+      if (!invitation) {
+        throw new Error("No hay INVITE SIP activo en esta pestaña. Cierra otras pestañas del panel, pulsa Desconectar y vuelve a Conectar el telefono web 1099.");
+      }
+
+      if (webphoneSessionDirectionRef.current === "idle") {
+        webphoneSessionDirectionRef.current = "incoming";
+      }
+      setWebphoneCallMode(mode);
+      setWebphoneCanAnswer(false);
+      if (mode === "video") {
+        await startLocalPreview();
+      } else {
+        stopLocalPreview();
+      }
+      await invitation.accept({
+        sessionDescriptionHandlerOptions: {
+          constraints: {
+            audio: true,
+            video: mode === "video"
+          }
+        }
+      });
+      setWebphoneIncoming(false);
+      setWebphoneCanAnswer(false);
+      setWebphoneInCall(true);
+      setWebphoneStatus("EN LLAMADA");
+      setWebphoneNotice(`Llamada respondida en modo ${mode === "video" ? "video" : "audio"}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo responder la llamada";
+      setWebphoneError(message);
+    } finally {
+      setWebphoneBusy(false);
+    }
+  }
+
+  async function hangupWebphoneCall() {
+    const runtime = webphoneRef.current;
+
+    if (!runtime) {
+      return;
+    }
+
+    setWebphoneBusy(true);
+    setWebphoneError(null);
+
+    try {
+      if (runtime.session) {
+        await terminateWebphoneSession(runtime.session);
+        runtime.session = null;
+      }
+      finishWebphoneCall("Llamada finalizada.");
+    } catch (error) {
+      setWebphoneError(error instanceof Error ? error.message : "No se pudo colgar la llamada");
+    } finally {
+      setWebphoneBusy(false);
+    }
+  }
+
   if (!authConfigState) {
     return (
       <main className="login-shell">
@@ -980,88 +1664,6 @@ export function App() {
     );
   }
 
-  const callCenterMetrics = callCenter?.metrics;
-  const leads = callCenter?.leads.leads ?? [];
-  const nextLead = callCenter?.leads.nextLead ?? null;
-  const transcripts = callCenter?.transcripts.transcripts ?? [];
-  const companyExtensions = extensionStatuses.filter((extension) => !isSimulatedClientExtension(extension.extension));
-  const clientExtensions = extensionStatuses.filter((extension) => isSimulatedClientExtension(extension.extension));
-  const companyQuickDial = buildCompanyQuickDial(companyExtensions);
-  const clientQuickDial = clientExtensions;
-  const callCenterHealth = callCenter?.health ?? health?.callCenter ?? observability?.callCenter ?? null;
-  const callCenterState = callCenterHealth ? (callCenterHealth.ok ? "OK" : "FALLA") : undefined;
-  const networkPreview = previewNetwork(networkForm.lanIp, Number(networkForm.lanCidr));
-
-  const statusCards = [
-    {
-      icon: <Database size={25} />,
-      title: "PostgreSQL",
-      state: health?.db.ok ? "OK" : "FALLA",
-      leftLabel: "Latency",
-      leftValue: `${Math.round(observability?.metrics.averageRequestMs ?? 0)} ms`,
-      rightLabel: "Ultima verificacion",
-      rightValue: formatTime(health?.at)
-    },
-    {
-      icon: <RadioTower size={25} />,
-      title: "Asterisk AMI",
-      state: health?.ami.connected ? "OK" : "FALLA",
-      leftLabel: "Sesiones",
-      leftValue: health?.ami.connected ? "1" : "0",
-      rightLabel: "Ultima verificacion",
-      rightValue: formatTime(health?.at)
-    },
-    {
-      icon: <PhoneCall size={25} />,
-      title: "Call Center IA",
-      state: callCenterState,
-      leftLabel: "Leads pendientes",
-      leftValue: callCenterMetrics?.leadsPending ?? callCenter?.leads.pending ?? 0,
-      rightLabel: "Oportunidades",
-      rightValue: callCenterMetrics?.salesOpportunities ?? 0
-    },
-    {
-      icon: <Cloud size={25} />,
-      title: "Floci SQS",
-      state: health?.floci.sqs.ok ? "OK" : "FALLA",
-      leftLabel: "Eventos",
-      leftValue: observability?.metrics.callEvents ?? 0,
-      rightLabel: "Ultima verificacion",
-      rightValue: formatTime(health?.at)
-    },
-    {
-      icon: <FileText size={25} />,
-      title: "Floci S3",
-      state: health?.floci.s3.ok ? "OK" : "FALLA",
-      leftLabel: "Objetos",
-      leftValue: observability?.callStats.withEvidence ?? 0,
-      rightLabel: "Ultima verificacion",
-      rightValue: formatTime(health?.at)
-    },
-    {
-      icon: <BarChart3 size={25} />,
-      title: "Asterisk CDR",
-      state: health?.cdr.ok ? "OK" : "FALLA",
-      leftLabel: "Registros hoy",
-      leftValue: observability?.callStats.recentTotal ?? 0,
-      rightLabel: "Grabaciones",
-      rightValue: recordings.length
-    },
-    {
-      icon: <Server size={25} />,
-      title: "WebSocket",
-      state: socketState === "CONNECTED" ? "CONECTADO" : socketState,
-      leftLabel: "Sesiones",
-      leftValue: socketState === "CONNECTED" ? "1" : "0",
-      rightLabel: "Ultima verificacion",
-      rightValue: formatTime(observability?.at)
-    }
-  ];
-
-  function navigateToSection(sectionId: string) {
-    setActiveNav(sectionId);
-  }
-
   return (
     <main className={`app-frame view-${activeNav}`}>
       <aside className="sidebar">
@@ -1077,7 +1679,6 @@ export function App() {
 
         <nav className="side-nav" aria-label="Principal">
           <SidebarItem active={activeNav === "resumen"} icon={<Home size={20} />} label="Resumen" onClick={() => navigateToSection("resumen")} />
-          <SidebarItem active={activeNav === "callcenter"} icon={<PhoneCall size={20} />} label="Call Center" onClick={() => navigateToSection("callcenter")} />
           <SidebarItem active={activeNav === "llamadas"} icon={<PhoneCall size={20} />} label="Llamadas" onClick={() => navigateToSection("llamadas")} />
           <SidebarItem active={activeNav === "extensiones"} icon={<SlidersHorizontal size={20} />} label="Empresa" onClick={() => navigateToSection("extensiones")} />
           <SidebarItem active={activeNav === "clientes"} icon={<Users size={20} />} label="Clientes" onClick={() => navigateToSection("clientes")} />
@@ -1112,10 +1713,6 @@ export function App() {
             <button className="icon-button" type="button" onClick={() => void loadData()} aria-label="Actualizar">
               <RefreshCw size={18} />
             </button>
-            <button className="primary-button" type="button" disabled={dialingLead} onClick={() => void dialNextLeadAction()}>
-              <Play size={18} />
-              Marcar lead
-            </button>
             {authConfigState.enabled && (
               <button className="icon-button" type="button" onClick={logout} aria-label="Cerrar sesion">
                 <LogOut size={18} />
@@ -1132,7 +1729,7 @@ export function App() {
 
         <section className="direct-call-toolbar" aria-label="Marcacion directa">
           <label>
-            Llamar desde
+            Origen PBX
             <select value={directCallOrigin} onChange={(event) => setDirectCallOrigin(event.target.value)}>
               {companyExtensions.map((extension) => (
                 <option key={extension.extension} value={extension.extension}>
@@ -1142,9 +1739,32 @@ export function App() {
             </select>
           </label>
           <span>
-            {directCallOrigin || "1001"} llama primero; al contestar se conecta con el destino seleccionado.
+            {usingWebphoneOrigin
+              ? "1099 es el puesto fijo de esta laptop. Usa microfono y camara del navegador."
+              : `${directCallOrigin || "1099"} origina la llamada desde Asterisk. 1001 corresponde a tu celular/Linphone si lo registras.`}
           </span>
         </section>
+
+        {webphoneIncoming && (
+          <section className="incoming-call-banner" aria-live="assertive">
+            <div>
+              <strong>Llamada entrante en {webphoneConfig.extension}</strong>
+              <span>
+                {webphoneCanAnswer
+                  ? "Responde desde el telefono web de la laptop."
+                  : "La central la detecto, pero esta pestaña aun no recibio la sesion SIP."}
+              </span>
+            </div>
+            <button className="primary-button compact-action" type="button" disabled={webphoneBusy || !webphoneCanAnswer} onClick={() => void answerWebphoneCall()}>
+              <PhoneCall size={16} />
+              Responder
+            </button>
+            <button className="secondary-button compact-action" type="button" disabled={webphoneBusy || !webphoneCanAnswer} onClick={() => void answerWebphoneCallWithMode("video")}>
+              <Video size={16} />
+              Video
+            </button>
+          </section>
+        )}
 
         <section className="dashboard-grid">
           <div className="main-column">
@@ -1177,6 +1797,26 @@ export function App() {
 
               <Panel id="extensiones" title="Red privada 1 - Empresa / Call Center" icon={<Headphones size={20} />} className="softphone-panel">
                 <div className="dial-section">
+                  <WebphonePanel
+                    config={webphoneConfig}
+                    status={webphoneStatus}
+                    registered={webphoneRegistered}
+                    inCall={webphoneInCall}
+                    incoming={webphoneIncoming}
+                    canAnswer={webphoneCanAnswer}
+                    busy={webphoneBusy}
+                    notice={webphoneNotice}
+                    error={webphoneError}
+                    mode={webphoneCallMode}
+                    localVideoRef={localVideoRef}
+                    remoteVideoRef={remoteVideoRef}
+                    onChange={setWebphoneConfig}
+                    onConnect={() => void connectWebphone()}
+                    onDisconnect={() => void disconnectWebphone()}
+                    onAnswer={() => void answerWebphoneCall()}
+                    onAnswerVideo={() => void answerWebphoneCallWithMode("video")}
+                    onHangup={() => void hangupWebphoneCall()}
+                  />
                   <QuickDialGrid
                     title="Marcacion rapida por area"
                     subtitle="Selecciona el area interna y Asterisk conectara desde la extension origen."
@@ -1197,6 +1837,7 @@ export function App() {
                     extensions={companyExtensions}
                     callingTarget={callingTarget}
                     onCall={(extension, mode) => void originatePanelCall(extension, mode)}
+                    onEdit={startEditingExtension}
                   />
                 </div>
               </Panel>
@@ -1217,88 +1858,21 @@ export function App() {
                     onChange={(value) => setManualDial((current) => ({ ...current, client: value }))}
                     onSubmit={(event) => void submitManualDial(event, "client")}
                   />
+                  <button className="secondary-button full" type="button" onClick={startNewClient}>
+                    <Plus size={18} />
+                    Nuevo cliente
+                  </button>
                   <ExtensionZone
                     title="Directorio clientes"
-                    subtitle="Contactos simulados registrados en la segunda red privada"
+                    subtitle="Personas registradas en la segunda red privada. Puedes llamarlas o editar sus datos."
                     extensions={clientExtensions}
                     callingTarget={callingTarget}
                     onCall={(extension, mode) => void originatePanelCall(extension, mode)}
+                    onEdit={startEditingExtension}
                   />
                 </div>
               </Panel>
             </section>
-
-            <Panel id="callcenter" title="Call center - ventas y calidad" icon={<PhoneCall size={20} />} className="callcenter-panel">
-              <div className="callcenter-overview">
-                <div className="callcenter-kpis">
-                  <MetricCard label="Leads pendientes" value={callCenterMetrics?.leadsPending ?? callCenter?.leads.pending ?? 0} />
-                  <MetricCard label="Marcaciones" value={callCenterMetrics?.callsTotal ?? 0} />
-                  <MetricCard label="Contestadas" value={`${callCenterMetrics?.answerRatePercent ?? 0}%`} />
-                  <MetricCard label="Oportunidades" value={callCenterMetrics?.salesOpportunities ?? 0} />
-                  <MetricCard label="Calidad promedio" value={`${callCenterMetrics?.averageQualityScore ?? 0}/100`} />
-                  <MetricCard label="Datos enmascarados" value={callCenterMetrics?.sensitiveMasked ?? 0} />
-                </div>
-                <div className="callcenter-actions">
-                  <div className="next-lead-box">
-                    <span>Siguiente lead</span>
-                    <strong>{nextLead ? `${nextLead.name} (${nextLead.phone})` : "Sin leads pendientes"}</strong>
-                  </div>
-                  <button className="primary-button full" type="button" disabled={dialingLead} onClick={() => void dialNextLeadAction()}>
-                    <Play size={18} />
-                    {dialingLead ? "Marcando" : "Marcar siguiente lead"}
-                  </button>
-                  <button className="secondary-button full" type="button" disabled={analyzingText} onClick={() => void analyzeDemoText()}>
-                    <FileText size={18} />
-                    {analyzingText ? "Analizando" : "Analizar texto demo"}
-                  </button>
-                  <button className="secondary-button full" type="button" onClick={() => void simulateCall()}>
-                    <Activity size={18} />
-                    Registrar llamada demo
-                  </button>
-                </div>
-              </div>
-
-              {(callCenterNotice || callCenterError) && (
-                <div className="callcenter-message">
-                  {callCenterNotice && <p className="form-success">{callCenterNotice}</p>}
-                  {callCenterError && <p className="form-error">{callCenterError}</p>}
-                </div>
-              )}
-
-              <div className="callcenter-detail-grid">
-                <div className="lead-list">
-                  <h3>Cola de leads</h3>
-                  {leads.length === 0 && <p className="empty-note">Sin leads cargados.</p>}
-                  {leads.slice(0, 4).map((lead) => (
-                    <div className="lead-row" key={lead.id}>
-                      <div className="row-main">
-                        <strong>{lead.name}</strong>
-                        <span>
-                          {lead.phone} - prioridad {lead.priority}
-                        </span>
-                      </div>
-                      <StatusPill value={lead.status} />
-                    </div>
-                  ))}
-                </div>
-                <div className="transcript-list">
-                  <h3>Analisis de llamadas</h3>
-                  {transcripts.length === 0 && <p className="empty-note">Sin transcripciones registradas.</p>}
-                  {transcripts.slice(0, 3).map((transcript) => (
-                    <div className="transcript-row" key={transcript._id}>
-                      <div className="row-main">
-                        <strong>{transcript.leadName ?? transcript.callId}</strong>
-                        <span>{transcript.analysis.summary}</span>
-                      </div>
-                      <div className="transcript-tags">
-                        <StatusPill value={transcript.analysis.opportunity ? "OPORTUNIDAD" : "SIN OPORTUNIDAD"} />
-                        {transcript.sensitiveDataMasked && <StatusPill value="ENMASCARADO" />}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </Panel>
 
             <Panel
               title="Tiempo real - llamadas"
@@ -1348,8 +1922,8 @@ export function App() {
                         </td>
                         <td>{formatDuration(call)}</td>
                         <td>
-                          <strong>{call.fuente}</strong>
-                          <span>{call.ultimo_evento ?? "sin evento"}</span>
+                          <strong>{displaySource(call.fuente)}</strong>
+                          <span>{call.ultimo_evento ? displayStatus(call.ultimo_evento) : "sin evento"}</span>
                         </td>
                         <td>
                           <span title={call.evidencia_key ?? undefined}>
@@ -1631,6 +2205,7 @@ export function App() {
           </aside>
         </section>
       </section>
+      <audio ref={remoteAudioRef} autoPlay playsInline />
     </main>
   );
 }
@@ -1704,6 +2279,150 @@ function ProviderIcon({ supplier }: { supplier: DemoSupplier }) {
   }
 
   return <FileText className="provider-icon dark" size={27} />;
+}
+
+function WebphonePanel({
+  config,
+  status,
+  registered,
+  inCall,
+  incoming,
+  canAnswer,
+  busy,
+  notice,
+  error,
+  mode,
+  localVideoRef,
+  remoteVideoRef,
+  onChange,
+  onConnect,
+  onDisconnect,
+  onAnswer,
+  onAnswerVideo,
+  onHangup
+}: {
+  config: WebphoneConfig;
+  status: string;
+  registered: boolean;
+  inCall: boolean;
+  incoming: boolean;
+  canAnswer: boolean;
+  busy: boolean;
+  notice: string | null;
+  error: string | null;
+  mode: WebphoneCallMode;
+  localVideoRef: RefObject<HTMLVideoElement | null>;
+  remoteVideoRef: RefObject<HTMLVideoElement | null>;
+  onChange: (value: SetStateAction<WebphoneConfig>) => void;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onAnswer: () => void;
+  onAnswerVideo: () => void;
+  onHangup: () => void;
+}) {
+  return (
+    <div className="webphone-card">
+      <div className="zone-heading">
+        <strong>Telefono web del navegador</strong>
+        <span>Extension {config.extension}. Permite llamar desde esta laptop sin abrir Linphone.</span>
+      </div>
+      <div className="webphone-grid">
+        <label>
+          Extension
+          <input value={config.extension} onChange={(event) => onChange((current) => ({ ...current, extension: event.target.value }))} />
+        </label>
+        <label>
+          Clave SIP
+          <input
+            type="password"
+            value={config.password}
+            onChange={(event) => onChange((current) => ({ ...current, password: event.target.value }))}
+          />
+        </label>
+        <label>
+          WS SIP
+          <input value={config.server} onChange={(event) => onChange((current) => ({ ...current, server: event.target.value }))} />
+        </label>
+        <label>
+          Dominio SIP
+          <input value={config.aorHost} onChange={(event) => onChange((current) => ({ ...current, aorHost: event.target.value }))} />
+        </label>
+      </div>
+      <div className="webphone-actions">
+        <StatusPill value={status} />
+        <button className="primary-button compact-action" type="button" disabled={busy || registered} onClick={onConnect}>
+          <Wifi size={16} />
+          Conectar
+        </button>
+        <button className="secondary-button compact-action" type="button" disabled={busy || !registered} onClick={onDisconnect}>
+          <WifiOff size={16} />
+          Desconectar
+        </button>
+        <button className="secondary-button compact-action" type="button" disabled={busy || !incoming || !canAnswer} onClick={onAnswer}>
+          <PhoneCall size={16} />
+          Resp. audio
+        </button>
+        <button className="secondary-button compact-action" type="button" disabled={busy || !incoming || !canAnswer} onClick={onAnswerVideo}>
+          <Video size={16} />
+          Resp. video
+        </button>
+        <button className="secondary-button compact-action" type="button" disabled={busy || (!inCall && !incoming)} onClick={onHangup}>
+          <Square size={16} />
+          Colgar
+        </button>
+      </div>
+      <div className="webphone-preview-grid">
+        <div className="webphone-preview">
+          <strong>Camara local</strong>
+          <video ref={localVideoRef} autoPlay playsInline muted />
+        </div>
+        <div className="webphone-preview">
+          <strong>Video remoto</strong>
+          <video ref={remoteVideoRef} autoPlay playsInline />
+        </div>
+      </div>
+      <div className="webphone-hint">
+        <span>{registered ? "Listo para marcar usando 1099" : "Conecta primero el telefono web para usar 1099 como origen"}</span>
+        <span>Modo actual: {mode === "video" ? "videollamada" : "audio"}.</span>
+      </div>
+      {(notice || error) && (
+        <div className="callcenter-message">
+          {notice && <p className="form-success">{notice}</p>}
+          {error && <p className="form-error">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function buildDefaultWebphoneConfig(): WebphoneConfig {
+  const host = window.location.hostname || "localhost";
+
+  return normalizeWebphoneConfig({
+    extension: "1099",
+    password: "Telefonia1099",
+    server: buildSipWebSocketUrl(),
+    aorHost: host
+  });
+}
+
+function normalizeWebphoneConfig(config: WebphoneConfig): WebphoneConfig {
+  const host = window.location.hostname || config.aorHost || "localhost";
+
+  return {
+    ...config,
+    server: buildSipWebSocketUrl(),
+    aorHost: config.aorHost || host
+  };
+}
+
+function buildSipWebSocketUrl() {
+  const apiUrl = new URL(API_URL);
+  apiUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+  apiUrl.pathname = "/sip-ws";
+  apiUrl.search = "";
+  apiUrl.hash = "";
+  return apiUrl.toString();
 }
 
 function QuickDialGrid({
@@ -1800,13 +2519,15 @@ function ExtensionZone({
   subtitle,
   extensions,
   callingTarget,
-  onCall
+  onCall,
+  onEdit
 }: {
   title: string;
   subtitle: string;
   extensions: ExtensionRuntimeStatus[];
   callingTarget: string | null;
   onCall: (extension: string, mode: "audio" | "video") => void;
+  onEdit?: (extension: string) => void;
 }) {
   return (
     <div className="extension-zone">
@@ -1825,6 +2546,16 @@ function ExtensionZone({
           </div>
           <StatusPill value={extension.reachable === false ? "NO DISPONIBLE" : extension.status} />
           <div className="extension-actions">
+            {onEdit && (
+              <button
+                className="icon-button compact"
+                type="button"
+                onClick={() => onEdit(extension.extension)}
+                aria-label={`Editar ${extension.extension}`}
+              >
+                <Pencil size={14} />
+              </button>
+            )}
             <button
               className="icon-button compact"
               type="button"
@@ -1909,7 +2640,120 @@ function StatusTile({
 }
 
 function StatusPill({ value }: { value: string }) {
-  return <span className={`pill ${statusClass(value)}`}>{value}</span>;
+  return <span className={`pill ${statusClass(value)}`}>{displayStatus(value)}</span>;
+}
+
+function displayStatus(value: string | null | undefined) {
+  if (!value) {
+    return "Sin dato";
+  }
+
+  const labels: Record<string, string> = {
+    ANSWERED: "Contestada",
+    BRIDGEENTER: "Conectada",
+    BUSY: "Ocupado",
+    CANCEL: "Cancelada",
+    CHANUNAVAIL: "Canal no disponible",
+    CLOSED: "Cerrado",
+    COMPLETED: "Completada",
+    CONGESTION: "Congestion",
+    CONNECTED: "Conectado",
+    DIALBEGIN: "Marcando",
+    DIALEND: "Marcacion finalizada",
+    DIALING: "Marcando",
+    DISCONNECTED: "Desconectado",
+    FAILED: "Fallida",
+    HANGUP: "Finalizada",
+    HALF_OPEN: "Medio abierto",
+    INUSE: "En uso",
+    NEWCHANNEL: "Canal creado",
+    NOANSWER: "No contestada",
+    NOT_INUSE: "Libre",
+    OPEN: "Abierto",
+    ORIGINATE_FAILED: "Originate fallido",
+    PENDING: "Pendiente",
+    REACHABLE: "Disponible",
+    REGISTERED: "Registrado",
+    RINGING: "Timbrando",
+    UNAVAILABLE: "No disponible",
+    UNREACHABLE: "No alcanzable",
+    UNREGISTERED: "No registrado",
+    UNKNOWN: "Desconocido"
+  };
+
+  return labels[value.toUpperCase()] ?? value;
+}
+
+function displaySource(value: string | null | undefined) {
+  const labels: Record<string, string> = {
+    ami: "Asterisk AMI",
+    manual: "Manual",
+    simulator: "Simulador",
+    cdr: "Asterisk CDR"
+  };
+
+  return labels[(value ?? "").toLowerCase()] ?? value ?? "Sin fuente";
+}
+
+function isIncomingCallForExtension(call: Llamada, extension: string) {
+  const target = extension.trim();
+
+  if (!target || call.extension_origen === target) {
+    return false;
+  }
+
+  const state = call.estado.toUpperCase();
+  const event = call.ultimo_evento?.toUpperCase() ?? "";
+  const destinationName = call.nombre_destino?.toLowerCase() ?? "";
+
+  if (!["RINGING", "NEWCHANNEL"].includes(state) && !["DIALBEGIN", "NEWCHANNEL"].includes(event)) {
+    return false;
+  }
+
+  return call.extension_destino === target || destinationName.includes(target) || destinationName.includes("operador web");
+}
+
+function isCallForExtension(call: Llamada, extension: string) {
+  const target = extension.trim();
+
+  if (!target) {
+    return false;
+  }
+
+  const originName = call.nombre_origen?.toLowerCase() ?? "";
+  const destinationName = call.nombre_destino?.toLowerCase() ?? "";
+
+  return (
+    call.extension_origen === target ||
+    call.extension_destino === target ||
+    originName.includes(target) ||
+    destinationName.includes(target) ||
+    originName.includes("operador web") ||
+    destinationName.includes("operador web")
+  );
+}
+
+function hasTerminalSibling(call: Llamada, calls: Llamada[]) {
+  const identifiers = new Set([call.ami_linkedid, call.ami_uniqueid].filter(Boolean));
+
+  if (identifiers.size === 0) {
+    return false;
+  }
+
+  return calls.some((candidate) => {
+    if (candidate.id === call.id || !isTerminalCall(candidate)) {
+      return false;
+    }
+
+    return (
+      (candidate.ami_linkedid !== null && identifiers.has(candidate.ami_linkedid)) ||
+      (candidate.ami_uniqueid !== null && identifiers.has(candidate.ami_uniqueid))
+    );
+  });
+}
+
+function isTerminalCall(call: Llamada) {
+  return Boolean(call.fecha_fin) || ["BUSY", "CANCEL", "CHANUNAVAIL", "COMPLETED", "CONGESTION", "FAILED", "HANGUP", "NOANSWER"].includes(call.estado);
 }
 
 function statusClass(value: string | undefined) {

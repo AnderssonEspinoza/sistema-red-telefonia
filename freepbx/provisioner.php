@@ -125,7 +125,7 @@ function runCliWorker(array $argv): void
                 'secret' => (string)$payload['secret'],
                 'outboundcid' => '',
                 'password' => '',
-                'max_contacts' => 2,
+                'max_contacts' => $extension === '1099' ? 1 : 2,
                 'vm' => 'no',
                 'vmpwd' => '',
                 'email' => '',
@@ -145,6 +145,7 @@ function runCliWorker(array $argv): void
         }
 
         applyNatAudioSettings($extension);
+        applyLabContext($extension);
         applyRecordingSettings($extension, (bool)$payload['recording']);
 
         $reloadOutput = [];
@@ -245,6 +246,7 @@ function configureNetwork(array $payload): void
     $sipsettings->setConfig('rtpend', '10100');
 
     applyNatAudioSettingsForAllExtensions();
+    applyLabContextsForKnownExtensions();
 
     $reloadOutput = [];
     $reloadCode = 0;
@@ -295,33 +297,118 @@ function applyNatAudioSettings(string $extension): void
 {
     $db = FreePBX::Database();
     $settings = [
+        'allow' => 'ulaw,alaw,gsm,g726,g722,h264,vp8',
         'direct_media' => 'no',
         'rtp_symmetric' => 'yes',
         'force_rport' => 'yes',
         'rewrite_contact' => 'yes',
         'media_encryption' => 'no',
+        'qualify_frequency' => '0',
+        'qualifyfreq' => '0',
     ];
 
     foreach ($settings as $keyword => $value) {
         $stmt = $db->prepare('UPDATE sip SET data = ? WHERE id = ? AND keyword = ?');
         $stmt->execute([$value, $extension, $keyword]);
     }
+
+    if ($extension === '1099') {
+        applyWebrtcSettings($db, $extension);
+    }
+}
+
+function applyLabContext(string $extension): void
+{
+    $db = FreePBX::Database();
+    $context = extensionContext($extension);
+
+    if ($context === null) {
+        return;
+    }
+
+    $stmt = $db->prepare(
+        'INSERT INTO sip (id, keyword, data, flags) VALUES (?, ?, ?, 0)
+         ON DUPLICATE KEY UPDATE data = VALUES(data)'
+    );
+    $stmt->execute([$extension, 'context', $context]);
+}
+
+function applyLabContextsForKnownExtensions(): void
+{
+    foreach (['1001', '1002', '1003', '1004', '1099', '2001', '3001', '4001', '9001', '9002', '9003', '9004', '9005'] as $extension) {
+        applyLabContext($extension);
+    }
+}
+
+function extensionContext(string $extension): ?string
+{
+    if (preg_match('/^9\d{3}$/', $extension)) {
+        return 'lab-clients';
+    }
+
+    if (preg_match('/^(100[1-4]|1099|2001|3001|4001)$/', $extension)) {
+        return 'lab-enterprise';
+    }
+
+    return null;
 }
 
 function applyNatAudioSettingsForAllExtensions(): void
 {
     $db = FreePBX::Database();
     $settings = [
+        'allow' => 'ulaw,alaw,gsm,g726,g722,h264,vp8',
         'direct_media' => 'no',
         'rtp_symmetric' => 'yes',
         'force_rport' => 'yes',
         'rewrite_contact' => 'yes',
         'media_encryption' => 'no',
+        'qualify_frequency' => '0',
+        'qualifyfreq' => '0',
     ];
 
     foreach ($settings as $keyword => $value) {
         $stmt = $db->prepare('UPDATE sip SET data = ? WHERE keyword = ?');
         $stmt->execute([$value, $keyword]);
+    }
+
+    applyWebrtcSettings($db, '1099');
+}
+
+function applyWebrtcSettings(PDO $db, string $extension): void
+{
+    $settings = [
+        'allow' => 'ulaw,alaw,gsm,g726,g722,h264,vp8',
+        'transport' => '0.0.0.0-ws',
+        'webrtc' => 'yes',
+        'media_encryption' => 'dtls',
+        'dtls_auto_generate_cert' => 'yes',
+        'dtls_setup' => 'actpass',
+        'avpf' => 'yes',
+        'use_avpf' => 'yes',
+        'force_avp' => 'yes',
+        'ice_support' => 'yes',
+        'icesupport' => 'yes',
+        'bundle' => 'yes',
+        'rtcp_mux' => 'yes',
+        'media_use_received_transport' => 'yes',
+        'direct_media' => 'no',
+        'rtp_symmetric' => 'yes',
+        'force_rport' => 'yes',
+        'rewrite_contact' => 'yes',
+        'max_contacts' => '1',
+        'remove_existing' => 'yes',
+        'remove_unavailable' => 'yes',
+        'qualify_frequency' => '0',
+        'qualifyfreq' => '0',
+    ];
+
+    foreach ($settings as $keyword => $value) {
+        $stmt = $db->prepare(
+            'INSERT INTO sip (id, keyword, data, flags) VALUES (?, ?, ?, 0)
+             ON DUPLICATE KEY UPDATE data = VALUES(data)'
+        );
+        $stmt->execute([$extension, $keyword, $value]);
     }
 }
 

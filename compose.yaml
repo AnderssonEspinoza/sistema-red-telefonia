@@ -9,11 +9,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
       TZ: ${TZ}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - data_net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -23,26 +23,26 @@ services:
   floci:
     image: floci/floci:latest
     restart: unless-stopped
-    ports:
-      - "4566:4566"
     volumes:
       - floci_data:/app/data
+    networks:
+      - local_cloud_net
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - data_net
 
   mongo:
     image: mongo:7
     restart: unless-stopped
-    ports:
-      - "${MONGO_PORT:-27017}:27017"
     volumes:
       - mongo_data:/data/db
+    networks:
+      - data_net
 
   host-network-agent:
     build:
@@ -62,11 +62,16 @@ services:
       REDIS_URL: redis://redis:6379/0
       AMI_HOST: freepbx
       AMI_PORT: 5038
+      CALL_MODE: ${CALL_MODE:-lab_internal}
     depends_on:
       redis:
         condition: service_started
       freepbx:
         condition: service_started
+    networks:
+      - app_net
+      - data_net
+      - voice_net
 
   transcription-service:
     build:
@@ -80,6 +85,9 @@ services:
     depends_on:
       mongo:
         condition: service_started
+    networks:
+      - app_net
+      - data_net
 
   metrics-service:
     build:
@@ -94,6 +102,9 @@ services:
         condition: service_started
       mongo:
         condition: service_started
+    networks:
+      - app_net
+      - data_net
 
   backend:
     build:
@@ -105,6 +116,7 @@ services:
       PORT: ${BACKEND_PORT}
       NODE_ENV: production
       HOST_NETWORK_AGENT_URL: http://host.docker.internal:${HOST_NETWORK_AGENT_PORT:-7040}
+      CALL_MODE: ${CALL_MODE:-lab_internal}
     ports:
       - "${BACKEND_PORT}:3000"
     extra_hosts:
@@ -124,6 +136,11 @@ services:
         condition: service_started
     volumes:
       - freepbx_var_data:/freepbx-var:ro
+    networks:
+      - app_net
+      - data_net
+      - voice_net
+      - local_cloud_net
 
   frontend:
     build:
@@ -136,6 +153,8 @@ services:
       - "${FRONTEND_PORT}:5173"
     depends_on:
       - backend
+    networks:
+      - app_net
 
   freepbx-db:
     image: mariadb:10.11
@@ -148,6 +167,8 @@ services:
     volumes:
       - freepbx_mysql_data:/var/lib/mysql
       - ./freepbx/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - data_net
     healthcheck:
       test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -p${FREEPBX_DB_ROOT_PASSWORD} --silent"]
       interval: 10s
@@ -156,6 +177,7 @@ services:
 
   freepbx:
     image: escomputers/freepbx:17-nofail2ban
+    hostname: freepbx
     restart: unless-stopped
     environment:
       TZ: ${TZ}
@@ -164,19 +186,26 @@ services:
     ports:
       - "${FREEPBX_HTTP_PORT}:80/tcp"
       - "${FREEPBX_HTTPS_PORT}:443/tcp"
+      - "8088:8088/tcp"
+      - "8089:8089/tcp"
       - "5060:5060/udp"
-      - "5038:5038/tcp"
       - "10000-10100:10000-10100/udp"
     volumes:
       - freepbx_var_data:/var
       - freepbx_etc_data:/etc
       - ./freepbx/manager_custom.conf:/etc/asterisk/manager_custom.conf:ro
+      - ./freepbx/http_custom.conf:/etc/asterisk/http_custom.conf:ro
+      - ./freepbx/pjsip.transports_custom.conf:/etc/asterisk/pjsip.transports_custom.conf:ro
       - ./freepbx/provisioner.php:/var/www/html/provisioner.php:ro
       - ./freepbx/extensions_custom.conf:/etc/asterisk/extensions_custom.conf:ro
       - ./freepbx/agi/sales_quality_agi.py:/var/lib/asterisk/agi-bin/sales_quality_agi.py:ro
     depends_on:
       freepbx-db:
         condition: service_healthy
+    networks:
+      - voice_net
+      - data_net
+      - app_net
 
 volumes:
   postgres_data:
@@ -186,3 +215,22 @@ volumes:
   freepbx_mysql_data:
   freepbx_var_data:
   freepbx_etc_data:
+
+networks:
+  voice_net:
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
+  app_net:
+    ipam:
+      config:
+        - subnet: 172.30.20.0/24
+  data_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.30.0/24
+  local_cloud_net:
+    ipam:
+      config:
+        - subnet: 172.30.40.0/24

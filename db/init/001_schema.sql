@@ -60,8 +60,9 @@ CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_entidad ON auditoria_acciones 
 
 INSERT INTO usuarios (nombre, extension, procedencia, area)
 VALUES
-  ('Juan Perez', '1001', 'Red Empresa', 'Soporte'),
+  ('Andersson Espinoza', '1001', 'Red Empresa', 'Soporte'),
   ('Maria Lopez', '1002', 'Red Empresa', 'Agentes'),
+  ('Operador Web', '1099', 'Red Empresa', 'Agentes'),
   ('Mesa Soporte 2', '1003', 'Red Empresa', 'Soporte'),
   ('Agente Sergio', '1004', 'Red Empresa', 'Agentes'),
   ('Equipo Marketing', '2001', 'Red Empresa', 'Marketing'),

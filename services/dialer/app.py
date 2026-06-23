@@ -16,6 +16,7 @@ AMI_USERNAME = os.getenv("AMI_USERNAME", "telefonia")
 AMI_SECRET = os.getenv("AMI_SECRET", "telefonia_ami_dev")
 DEFAULT_AGENT_EXTENSION = os.getenv("DEFAULT_AGENT_EXTENSION", "1001")
 MAX_ACTIVE_DIALS = int(os.getenv("MAX_ACTIVE_DIALS", "4"))
+CALL_MODE = os.getenv("CALL_MODE", "lab_internal")
 
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 app = FastAPI(title="Sales Dialer Service", version="1.0.0")
@@ -48,6 +49,7 @@ def health() -> dict[str, Any]:
         "redis": True,
         "amiHost": AMI_HOST,
         "maxActiveDials": MAX_ACTIVE_DIALS,
+        "callMode": CALL_MODE,
     }
 
 
@@ -85,6 +87,8 @@ def dial_next(request: DialRequest) -> dict[str, Any]:
     lead = load_lead(lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
+
+    validate_destination_for_call_mode(lead["phone"])
 
     call_id = str(uuid.uuid4())
     now = utcnow()
@@ -246,6 +250,24 @@ def originate_call(agent_extension: str, lead_phone: str, call_id: str) -> dict[
         "channel": payload["Channel"],
         "context": payload["Context"],
     }
+
+
+def validate_destination_for_call_mode(destination: str) -> None:
+    if CALL_MODE == "lab_internal":
+        if destination not in {"9001", "9002", "9003", "9004", "9005"}:
+            raise HTTPException(
+                status_code=400,
+                detail="CALL_MODE=lab_internal solo permite leads internos 9001-9005",
+            )
+        return
+
+    if CALL_MODE == "sip_trunk_ready":
+        raise HTTPException(
+            status_code=501,
+            detail="CALL_MODE=sip_trunk_ready esta documentado, pero no implementa proveedor SIP real",
+        )
+
+    raise HTTPException(status_code=400, detail=f"CALL_MODE no soportado: {CALL_MODE}")
 
 
 def send_ami_action(sock: socket.socket, fields: dict[str, str]) -> None:
